@@ -1,0 +1,36 @@
+# dependencies
+node_modules/
+
+# secrets
+.env
+.env.*
+!.env.example
+
+# hardhat
+artifacts/
+cache/
+typechain/
+typechain-types/
+coverage/
+coverage.json
+
+# foundry
+out/
+broadcast/
+lcov.info
+
+# layerzero devtools
+.layerzero/
+
+# local-only deployments (real network deployments ARE committed)
+deployments/localhost/
+deployments/hardhat/
+
+# logs
+*.log
+pnpm-error.log
+
+# editors / OS
+.DS_Store
+.idea/
+.vscode/

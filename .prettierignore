@@ -1,0 +1,8 @@
+node_modules
+artifacts
+cache
+out
+deployments
+pnpm-lock.yaml
+# verbatim copy of the verified BSC deployment: never reformat
+contracts/CatapultTrade.sol

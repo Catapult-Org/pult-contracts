@@ -1,0 +1,22 @@
+{
+  "exclude": ["node_modules"],
+  "include": [
+    "deploy",
+    "scripts",
+    "test",
+    "hardhat.config.ts",
+    "layerzero.config.ts",
+    "layerzero.testnet.config.ts",
+    "type-extensions.ts"
+  ],
+  "compilerOptions": {
+    "target": "es2020",
+    "lib": ["es2020", "dom"],
+    "module": "commonjs",
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "strict": true,
+    "skipLibCheck": true,
+    "resolveJsonModule": true
+  }
+}

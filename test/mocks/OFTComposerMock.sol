@@ -1,0 +1,27 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.22;
+
+import { IOAppComposer } from "@layerzerolabs/oapp-evm/contracts/oapp/interfaces/IOAppComposer.sol";
+
+// @dev records the last lzCompose call for assertions in tests
+contract OFTComposerMock is IOAppComposer {
+    address public from;
+    bytes32 public guid;
+    bytes public message;
+    address public executor;
+    bytes public extraData;
+
+    function lzCompose(
+        address _from,
+        bytes32 _guid,
+        bytes calldata _message,
+        address _executor,
+        bytes calldata /*_extraData*/
+    ) external payable {
+        from = _from;
+        guid = _guid;
+        message = _message;
+        executor = _executor;
+        extraData = _message;
+    }
+}
