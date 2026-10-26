@@ -3,6 +3,7 @@ artifacts
 cache
 out
 deployments
+deployments-staging
 pnpm-lock.yaml
 # verbatim copy of the verified BSC deployment: never reformat
 contracts/CatapultTrade.sol

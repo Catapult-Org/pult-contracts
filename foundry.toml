@@ -1,5 +1,6 @@
 [profile.default]
-solc-version = '0.8.30'
+solc = '0.8.30'
+evm_version = 'cancun'
 src = 'contracts'
 out = 'out'
 test = 'test/foundry'

@@ -3,10 +3,13 @@ import assert from 'assert'
 import { type DeployFunction } from 'hardhat-deploy/types'
 
 /**
- * Deploys the mint/burn PultOFT on every non-home chain (Robinhood Chain).
+ * Deploys the mint/burn PultOFT on every non-home chain (Robinhood Chain, Arbitrum).
  * Name / symbol mirror the BSC token: "Catapult Trade" / "PULT", 18 decimals.
+ * With DEPLOY_STAGE set (staging mesh) the token is named "PULT Staging" / "PULT-STG" so it can never be mistaken
+ * for the real PULT on explorers.
  */
 const contractName = 'PultOFT'
+const [tokenName, tokenSymbol] = process.env.DEPLOY_STAGE ? ['PULT Staging', 'PULT-STG'] : ['Catapult Trade', 'PULT']
 
 const deploy: DeployFunction = async (hre) => {
     const { getNamedAccounts, deployments } = hre
@@ -25,8 +28,8 @@ const deploy: DeployFunction = async (hre) => {
     const { address } = await deploy(contractName, {
         from: deployer,
         args: [
-            'Catapult Trade', // name
-            'PULT', // symbol
+            tokenName,
+            tokenSymbol,
             endpointV2Deployment.address, // LayerZero EndpointV2
             deployer, // owner + delegate
         ],

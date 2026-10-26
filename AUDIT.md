@@ -1,8 +1,62 @@
 # PULT omnichain bridge — audit scope & internal review
 
-Date: 2026-09-21 (fee support added the same day; Arbitrum One added to the mesh 2026-10-26, see 4.7–4.8). Reviewer:
-internal (pre-audit). Status: **ready for external audit** with the notes below. No contract code changed for Arbitrum:
-it runs the same `PultOFT` as Robinhood; only deployment and wiring configuration grew.
+Date: 2026-09-21 (fee support added the same day; Arbitrum One added to the mesh 2026-10-26, see 4.7–4.8; fee cap,
+gas limits and live staging run 2026-10-27, see §0 and 4.9–4.10). Reviewer: internal (pre-audit). Status: **ready for
+external audit** with the notes below. Arbitrum runs the same `PultOFT` as Robinhood.
+
+## 0. Response to the external auditor's pre-review (2026-10-27)
+
+| #   | Point raised                                                           | Status                                                                                                                                                                                                                                          | Evidence                                                                                                                                                                                                                                |
+| --- | ---------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | Default DVN on BSC ↔ Robinhood is a dead DVN; messages could get stuck | **Confirmed and closed by configuration.** Every pathway is wired with 2 explicit required DVNs (LayerZero Labs + Horizen) and explicit confirmations; `scripts/checkConfig.ts` reads the effective on-chain config and fails on any difference | §0.1 below: live check before wiring (dead DVN on Robinhood pathways) and after wiring (48/48 ok)                                                                                                                                       |
+| 2   | Owner can set fees up to 100 %                                         | **Fixed in code.** New `contracts/PultFee.sol` caps every fee at `MAX_FEE_BPS = 500` (5 %), on the default and per-destination setters, also for disabled overrides                                                                             | `PultBridgeFee.t.sol`: `test_fee_cap_is_5_percent_on_both_contracts`, `testFuzz_fee_setters_never_store_more_than_cap`; Hardhat `caps every fee at 5 %`; live run §0.2                                                                  |
+| 3   | Lock/mint backing invariant                                            | **Holds; no bug found.** Fees are taken before the message is built, so only `amountReceivedLD` is ever minted/unlocked                                                                                                                         | `PultBridgeMesh.t.sol`: `testFuzz_random_mesh_walk_preserves_invariants` (12 random hops over all 6 directions, random fees ≤ 5 %, 3 invariants after every hop; 10 000 runs green); live run §0.2 checks it on chain after every stage |
+| 4   | Dust, fee rounding, `feeBalance`, `withdrawFees`                       | **Correct; covered by tests.** Fee rounds down, dust (< 1e12 wei) accrues to `feeBalance`, `withdrawFees` can move only `feeBalance`                                                                                                            | `PultBridgeMesh.t.sol`: `test_amount_below_dust_goes_entirely_to_fee_balance`, `test_max_fee_with_dust_exact_accounting`, `test_withdrawFees_after_many_transfers_keeps_backing`; live run §0.2                                         |
+
+Found while answering point 3: the enforced `lzReceive` gas (120k / 150k) left only ~3 % headroom on the first message
+(4.9). Raised to 200k / 250k.
+
+### 0.1 DVN configuration, verified on chain
+
+`LZ_CONFIG=layerzero.config.ts npx hardhat run scripts/checkConfig.ts` compares, for each of the 6 directions: peer, send
+library, executor, send ULN config, enforced options, receive library, receive ULN config, plus owner == endpoint delegate.
+ULN configs are read through `EndpointV2.getConfig`, i.e. the effective config (OApp settings merged with LayerZero defaults).
+
+Result on the staging mesh (§0.2), 2026-10-27:
+
+- **Before** `lz:oapp:wire`: every check failed. BSC → Robinhood, Robinhood → BSC, Robinhood → Arbitrum and the receive
+  side for BSC → Robinhood used a single required DVN `0x6788…E842` (`LZDeadDVN`) or a placeholder default; no peers, no
+  enforced gas. A transfer at that point would never be delivered.
+- **After** `lz:oapp:wire` (27 transactions): **48/48 checks ok.** All 6 directions: 2 required DVNs (LayerZero Labs +
+  Horizen), 0 optional, confirmations BSC 20 / Arbitrum 20 / Robinhood 5, enforced `lzReceive` gas 200k / 250k, peers
+  set, delegate == owner.
+
+### 0.2 Live end-to-end run on mainnet (staging mesh)
+
+A separate mesh with the audited code was deployed on the real chains (`DEPLOY_STAGE=staging`, `deployments-staging/`):
+
+| Chain     | Contract                                | Address                                      |
+| --------- | --------------------------------------- | -------------------------------------------- |
+| BSC       | `PultOFTAdapter` over the real PULT     | `0xFb66e0167c9C97b01FE3b5F453198e7B6252CDb5` |
+| Robinhood | `PultOFT` ("PULT Staging" / "PULT-STG") | `0x14522Cb95a0B7D99E03F5e680C2f866623d61Ae9` |
+| Arbitrum  | `PultOFT` ("PULT Staging" / "PULT-STG") | `0x8B059687246d6570306AB86E6c6F68130f760C69` |
+
+`scripts/e2e.ts` with a separate user wallet, real DVNs and executors, every delivery matched by GUID (`OFTSent` →
+`OFTReceived`) and checked for the exact amount. Final run (2026-10-27 21:01–21:05 UTC, unit 20 PULT), all passed:
+
+1. BSC → Robinhood 60, BSC → Arbitrum 60, Robinhood → Arbitrum 20, Arbitrum → Robinhood 10: delivered in 11–45 s,
+   received == sent; OFT ↔ OFT left the BSC lockbox unchanged.
+2. `setDefaultFeeBps(501)` and `setFeeBps(.., 501)` revert on all three contracts. 5 % on Arbitrum → Robinhood:
+   20 sent, exactly 19.0 received, `feeBalance` +1.0. 1 % on BSC → Arbitrum with a dusty amount: 20.000000000123456789
+   sent, exactly 19.8 received, adapter `feeBalance` +0.200000000123456789 (fee + dust).
+3. `withdrawFees` on all contracts → `feeBalance` 0; the adapter then held exactly the remote supply (143.55 =
+   69.0 + 74.55).
+4. Everything bridged back to BSC: lockbox 0, both OFT supplies 0. User lost exactly the fees (1.200000000123456789).
+
+The backing invariant (locked == supply(Robinhood) + supply(Arbitrum) + adapter.feeBalance) and OFT fee custody were
+checked on chain after every stage. Earlier interrupted runs failed only in the test harness (balance-diff delivery
+detection, ethers' 1.5 gwei default priority fee draining the test wallet, public RPC rate limits); every message they
+sent was delivered and accounted for.
 
 ## 1. Scope
 
@@ -57,9 +111,9 @@ deployment and is the primary operational risk. See 5.1.
 The only custom Solidity is the fee port described in §2 (verified against the LayerZero reference and covered by
 `test/foundry/PultBridgeFee.t.sol`). Points for the auditors on that code:
 
-- Owner may set a fee of up to 100 % (`BPS_DENOMINATOR`), which would make sends deliver 0. This matches the LayerZero
-  reference; a lower hard cap (e.g. 10 %) is an easy hardening if the team wants it.
-- `unchecked { amountReceivedLD = _removeDust(_amountLD - fee) }` is safe because `fee <= _amountLD` (bps ≤ 10 000).
+- Fees are capped at 5 % (`PultFee.MAX_FEE_BPS = 500`, see 4.10). `PultFee` keeps the ABI, storage layout, events and
+  errors of LayerZero's `Fee.sol`; only the bound in the two setters changed (10 000 → 500).
+- `unchecked { amountReceivedLD = _removeDust(_amountLD - fee) }` is safe because `fee <= _amountLD` (bps ≤ 500).
 - `PultOFT._debit` transfers the fee to `address(this)` before burning; `withdrawFees` uses `_transfer(address(this), to)`,
   so the OFT never mints or burns fee tokens and the remote backing stays intact.
 - Fee is applied before de-dust, so the dust remainder also accrues to `feeBalance` (LayerZero semantics).
@@ -105,6 +159,20 @@ A per-network `etherscan.apiKey` object makes `hardhat-verify` use each explorer
 so BSC verification would fail. Now: one `ETHERSCAN_API_KEY` (v2 multichain) for BSC + Arbitrum, Blockscout for Robinhood,
 with exactly one verifier enabled for the selected `--network`.
 
+### 4.9 [Medium → fixed] Enforced `lzReceive` gas had ~3 % headroom
+
+`PultBridgeGas.t.sol` had never been run with a current Foundry. With forge 1.8 the first message on a pathway to a fresh
+recipient measures 116,624 gas (mint) / 102,882 (unlock), with compose 145,816 / 132,074, against enforced 120k / 150k:
+3 % headroom on the first mint, and the test (which requires 25 %) failed. Any small cost increase on a destination would
+have stranded the first transfers until manual re-execution. Raised to 200k / 250k (≥ 58 % headroom); the gas test
+passes again. Cost of the extra gas: ~0.00002 ETH / 0.00004 BNB per transfer at current prices.
+
+### 4.10 [Medium → fixed] Fee could be set to 100 % (auditor point 2)
+
+LayerZero's `Fee.setDefaultFeeBps` / `setFeeBps` are `external` and not `virtual`, so they cannot be overridden. Replaced by
+`contracts/PultFee.sol`: same interface (`IFee`), `MAX_FEE_BPS = 500`, setters revert `InvalidBps` above it. A user always
+receives ≥ 95 % of the amount minus < 1e12 wei dust.
+
 ### 4.6 [Info] Bytecode of `CatapultTrade` copy
 
 Compiled with the on-chain settings (solc 0.8.34, evm `osaka`, optimizer off, OZ 5.6.0) the creation code equals the BSC deploy
@@ -139,21 +207,26 @@ the deployed bytecode.
    Front-end should never expose the adapter address as a deposit address.
 5. **Recipient `address(0)`** on Robinhood is redirected to `0xdead` by `OFT._credit`; on BSC `safeTransfer(address(0))`
    reverts and the message stays retryable. Front-end must validate recipients.
-6. **Pre-deploy checklist**: `pnpm test` green → full testnet run (BSC testnet, Robinhood testnet, Arbitrum Sepolia) →
-   `lz:deploy` on `bsc` + `robinhood` + `arbitrum` → `lz:oapp:wire` → `lz:oapp:peers:get` shows 6 peers and
-   `lz:oapp:config:get` shows LayerZero Labs + Horizen in all 6 directions → small amount over every direction → transfer
-   ownership of all three OApps.
+6. **Pre-deploy checklist**: `pnpm test` green → staging run on mainnet (`DEPLOY_STAGE=staging`, §0.2) → `lz:deploy` on
+   `bsc` + `robinhood` + `arbitrum` → `lz:oapp:wire` → `scripts/checkConfig.ts` passes (no dead DVN, 6 peers, LayerZero Labs +
+   Horizen in all 6 directions) → `scripts/e2e.ts` with a small amount → transfer ownership of all three OApps → open the
+   bridge. Never announce the adapter address before `checkConfig` passes.
 
 ## 6. Test coverage
 
 - `test/foundry/PultBridge.t.sol` (14): token metadata + `claimERC20`; constructor/peers/decimals; lock+mint; burn+unlock; full
   round trip; `permit` + send; dust removal; `SlippageExceeded`; missing allowance; unknown peer (`NoPeer`); compose delivery;
   `onlyOwner` on `setPeer`; fuzzed supply invariant.
-- `test/foundry/PultBridgeFee.t.sol` (13): fee defaults, `setDefaultFeeBps` / `setFeeBps` bounds and override semantics,
+- `test/foundry/PultBridgeFee.t.sol` (14): fee defaults, 5 % cap on both contracts (incl. fuzz), `setDefaultFeeBps` /
+  `setFeeBps` bounds and override semantics,
   onlyOwner on all fee functions, fee on BSC→Robinhood and Robinhood→BSC, `quoteOFT`/`quoteSend` with fee, fee + slippage,
   zero-fee equivalence, `withdrawFees` on both sides (incl. re-bridging withdrawn OFT fees), fuzzed backing invariant.
-- `test/foundry/PultBridgeGas.t.sol` (5): `lzReceive` gas per path with headroom assertions tied to `layerzero.config.ts`.
-- `test/hardhat/PultBridge.test.ts` (11): same core flows plus fee + withdraw against `EndpointV2Mock`, with a three-chain
-  mesh: BSC → Arbitrum, Robinhood ↔ Arbitrum direct (adapter balance unchanged), Arbitrum → BSC, per-destination fee,
-  backing invariant over both OFT supplies. The Foundry suites still cover BSC ↔ Robinhood only (identical contract on
-  Arbitrum).
+- `test/foundry/PultBridgeGas.t.sol` (5): `lzReceive` gas per path with ≥ 25 % headroom assertions tied to
+  `layerzero.config.ts` (200k / 250k).
+- `test/foundry/PultBridgeMesh.t.sol` (7): the full three-chain mesh with the production contracts and the real ULN: all 6
+  directions, OFT ↔ OFT without touching BSC, sub-dust amounts, 5 % fee with dust, `withdrawFees` after 30 transfers with
+  mixed fees (adapter then holds exactly the remote supply), and a fuzzed random walk (12 hops, random fees ≤ 5 %) checking
+  backing, fee custody and total conservation after every hop.
+- `test/hardhat/PultBridge.test.ts` (12): same core flows plus fee + withdraw against `EndpointV2Mock`, three-chain mesh,
+  5 % cap.
+- Totals: Foundry 40, Hardhat 12, all green; fuzz tests also green at 10 000 runs (`FOUNDRY_FUZZ_RUNS=10000`).

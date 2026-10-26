@@ -43,9 +43,17 @@ const SELECTED_NETWORK =
     process.env.HARDHAT_NETWORK ?? (networkArgIndex >= 0 ? process.argv[networkArgIndex + 1] : undefined)
 const VERIFY_ON_BLOCKSCOUT = SELECTED_NETWORK === 'robinhood' || SELECTED_NETWORK === 'robinhood-testnet'
 
+/**
+ * DEPLOY_STAGE=staging: a separate, throwaway mesh on the real chains (own PultOFTAdapter over the real PULT on BSC,
+ * own PultOFTs named "PULT Staging") for end-to-end tests before the production deploy. Its artifacts live in
+ * deployments-staging/, so the production deployments/ are never touched. Unset = production.
+ */
+export const DEPLOY_STAGE = process.env.DEPLOY_STAGE || undefined
+
 const config: HardhatUserConfig = {
     paths: {
         cache: 'cache/hardhat',
+        deployments: DEPLOY_STAGE ? `deployments-${DEPLOY_STAGE}` : 'deployments',
     },
     solidity: {
         compilers: [

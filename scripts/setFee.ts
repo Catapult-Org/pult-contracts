@@ -15,8 +15,10 @@ async function main() {
     const oft = await ethers.getContractAt(name, (await deployments.get(name)).address, signer)
 
     const feeBps = Number(process.env.FEE_BPS)
-    if (!Number.isInteger(feeBps) || feeBps < 0 || feeBps > 10_000)
-        throw new Error('FEE_BPS must be an integer in [0, 10000]')
+    // Same cap as PultFee.MAX_FEE_BPS on-chain (5 %); checked here to fail before sending a transaction.
+    const maxFeeBps = Number(await oft.MAX_FEE_BPS())
+    if (!Number.isInteger(feeBps) || feeBps < 0 || feeBps > maxFeeBps)
+        throw new Error(`FEE_BPS must be an integer in [0, ${maxFeeBps}]`)
 
     console.log(`network=${network.name} ${name}=${oft.address} owner=${await oft.owner()} signer=${signer.address}`)
     console.log(

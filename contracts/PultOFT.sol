@@ -3,7 +3,7 @@ pragma solidity 0.8.30;
 
 import { Ownable } from "@openzeppelin/contracts/access/Ownable.sol";
 import { OFT } from "@layerzerolabs/oft-evm/contracts/OFT.sol";
-import { Fee } from "@layerzerolabs/oft-evm/contracts/Fee.sol";
+import { PultFee } from "./PultFee.sol";
 
 /**
  * @title PultOFT
@@ -12,7 +12,7 @@ import { Fee } from "@layerzerolabs/oft-evm/contracts/Fee.sol";
  * @dev Mint/burn representation: total supply on this chain always equals the amount of PULT
  *      backing it in `PultOFTAdapter` on BSC (net of the adapter's own fee balance).
  *      No tokens are minted at deployment.
- * @dev Fee model mirrors LayerZero's `OFTFeeUpgradeable`:
+ * @dev Fee model mirrors LayerZero's `OFTFeeUpgradeable`, capped at 5 % (`PultFee.MAX_FEE_BPS`):
  *      - `defaultFeeBps` applies to every destination, `setFeeBps(dstEid, bps, enabled)` overrides per destination;
  *      - on send, the fee (plus the de-dust remainder) is moved from the sender to this contract and tracked in
  *        `feeBalance`; only `amountReceivedLD` is burned. Fee tokens stay part of `totalSupply` and remain backed;
@@ -20,7 +20,7 @@ import { Fee } from "@layerzerolabs/oft-evm/contracts/Fee.sol";
  *      - with all fees at 0 (the default) behaviour is identical to the default OFT.
  * @dev Shared decimals are the OFT default (6): cross-chain amounts are rounded to 1e12 wei. Local decimals are 18.
  */
-contract PultOFT is OFT, Fee {
+contract PultOFT is OFT, PultFee {
     /// @notice Fee tokens (in local decimals) held by this contract and withdrawable by the owner.
     uint256 public feeBalance;
 

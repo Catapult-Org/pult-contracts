@@ -262,6 +262,17 @@ describe('PULT bridge: PultOFTAdapter (BSC) <-> PultOFT (Robinhood, Arbitrum)', 
         await expectBacked()
     })
 
+    it('caps every fee at 5 % (500 bps) on the adapter and the OFTs', async function () {
+        for (const app of [adapter, oft, oftArb]) {
+            expect(await app.MAX_FEE_BPS()).to.equal(500)
+            await app.connect(deployer).setDefaultFeeBps(500)
+            await app.connect(deployer).setFeeBps(eidBsc, 500, true)
+            await expectRevert(app.connect(deployer).setDefaultFeeBps(501), 'InvalidBps')
+            await expectRevert(app.connect(deployer).setFeeBps(eidBsc, 501, true), 'InvalidBps')
+            await expectRevert(app.connect(deployer).setFeeBps(eidBsc, 10_000, false), 'InvalidBps')
+        }
+    })
+
     it('applies per-destination fees only to the configured destination', async function () {
         await adapter.connect(deployer).setFeeBps(eidArbitrum, 50, true) // 0.5% BSC -> Arbitrum only
         const amount = ethers.utils.parseEther('10')

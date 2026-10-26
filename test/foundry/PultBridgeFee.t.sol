@@ -26,6 +26,7 @@ contract PultBridgeFeeTest is TestHelperOz5 {
     uint32 private constant BSC_EID = 1;
     uint32 private constant ROBINHOOD_EID = 2;
     uint16 private constant BPS = 10_000;
+    uint16 private constant MAX_FEE_BPS = 500; // PultFee.MAX_FEE_BPS (5 %)
     uint256 private constant CONVERSION_RATE = 1e12;
 
     CatapultTrade private pult;
@@ -128,10 +129,11 @@ contract PultBridgeFeeTest is TestHelperOz5 {
         assertEq(adapter.defaultFeeBps(), 150);
         assertEq(adapter.getFee(ROBINHOOD_EID, 1 ether), 0.015 ether);
 
-        // upper bound is 100%
-        adapter.setDefaultFeeBps(BPS);
+        // upper bound is 5 %
+        adapter.setDefaultFeeBps(MAX_FEE_BPS);
+        assertEq(adapter.defaultFeeBps(), MAX_FEE_BPS);
         vm.expectRevert(IFee.InvalidBps.selector);
-        adapter.setDefaultFeeBps(BPS + 1);
+        adapter.setDefaultFeeBps(MAX_FEE_BPS + 1);
     }
 
     function test_setFeeBps_per_destination_overrides_default() public {
@@ -151,7 +153,55 @@ contract PultBridgeFeeTest is TestHelperOz5 {
         assertEq(adapter.getFee(ROBINHOOD_EID, 1 ether), 0);
 
         vm.expectRevert(IFee.InvalidBps.selector);
-        adapter.setFeeBps(ROBINHOOD_EID, BPS + 1, true);
+        adapter.setFeeBps(ROBINHOOD_EID, MAX_FEE_BPS + 1, true);
+    }
+
+    function test_fee_cap_is_5_percent_on_both_contracts() public {
+        assertEq(adapter.MAX_FEE_BPS(), MAX_FEE_BPS);
+        assertEq(oft.MAX_FEE_BPS(), MAX_FEE_BPS);
+        assertEq(adapter.BPS_DENOMINATOR(), BPS);
+
+        adapter.setDefaultFeeBps(MAX_FEE_BPS);
+        adapter.setFeeBps(ROBINHOOD_EID, MAX_FEE_BPS, true);
+        oft.setDefaultFeeBps(MAX_FEE_BPS);
+        oft.setFeeBps(BSC_EID, MAX_FEE_BPS, true);
+
+        uint16[4] memory tooHigh = [MAX_FEE_BPS + 1, 1_000, BPS, type(uint16).max];
+        for (uint256 i; i < tooHigh.length; i++) {
+            vm.expectRevert(IFee.InvalidBps.selector);
+            adapter.setDefaultFeeBps(tooHigh[i]);
+            vm.expectRevert(IFee.InvalidBps.selector);
+            adapter.setFeeBps(ROBINHOOD_EID, tooHigh[i], true);
+            // a disabled override may not store an over-cap value either
+            vm.expectRevert(IFee.InvalidBps.selector);
+            adapter.setFeeBps(ROBINHOOD_EID, tooHigh[i], false);
+            vm.expectRevert(IFee.InvalidBps.selector);
+            oft.setDefaultFeeBps(tooHigh[i]);
+            vm.expectRevert(IFee.InvalidBps.selector);
+            oft.setFeeBps(BSC_EID, tooHigh[i], true);
+        }
+
+        // worst case: a user always receives at least 95 % (minus < 1e12 wei dust)
+        assertEq(adapter.getFee(ROBINHOOD_EID, 1_000 ether), 50 ether);
+        assertEq(oft.getFee(BSC_EID, 1_000 ether), 50 ether);
+    }
+
+    function testFuzz_fee_setters_never_store_more_than_cap(uint16 bps, uint32 dstEid, bool enabled) public {
+        if (bps > MAX_FEE_BPS) {
+            vm.expectRevert(IFee.InvalidBps.selector);
+            adapter.setDefaultFeeBps(bps);
+            vm.expectRevert(IFee.InvalidBps.selector);
+            oft.setFeeBps(dstEid, bps, enabled);
+        } else {
+            adapter.setDefaultFeeBps(bps);
+            oft.setFeeBps(dstEid, bps, enabled);
+        }
+        assertLe(adapter.defaultFeeBps(), MAX_FEE_BPS);
+        (uint16 stored, ) = oft.feeBps(dstEid);
+        assertLe(stored, MAX_FEE_BPS);
+        // fee is never more than 5 % of the amount
+        assertLe(adapter.getFee(dstEid, 1e30), (1e30 * uint256(MAX_FEE_BPS)) / BPS);
+        assertLe(oft.getFee(dstEid, 1e30), (1e30 * uint256(MAX_FEE_BPS)) / BPS);
     }
 
     function test_fee_setters_only_owner() public {
@@ -313,8 +363,8 @@ contract PultBridgeFeeTest is TestHelperOz5 {
         uint16 adapterBps,
         uint16 oftBps
     ) public {
-        adapterBps = uint16(bound(adapterBps, 0, 5_000));
-        oftBps = uint16(bound(oftBps, 0, 5_000));
+        adapterBps = uint16(bound(adapterBps, 0, MAX_FEE_BPS));
+        oftBps = uint16(bound(oftBps, 0, MAX_FEE_BPS));
         uint256 amount = bound(uint256(rawAmount), 2 * CONVERSION_RATE, initialBalance);
         adapter.setDefaultFeeBps(adapterBps);
         oft.setDefaultFeeBps(oftBps);

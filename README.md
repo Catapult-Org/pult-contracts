@@ -22,10 +22,11 @@ deploy/wiring, Foundry + `TestHelperOz5` for tests.
   (solc 0.8.34, evmVersion `osaka`, optimizer off) via a per-file override in `hardhat.config.ts`; the resulting
   creation code is identical to the BSC deployment tx except for the CBOR metadata hash (different source file name).
   Only deployed on testnets / locally.
-- `contracts/PultOFTAdapter.sol` — `OFTAdapter(token, endpoint, delegate)` + LayerZero `Fee` mixin. **Exactly one** adapter
+- `contracts/PultOFTAdapter.sol` — `OFTAdapter(token, endpoint, delegate)` + `PultFee`. **Exactly one** adapter
   may exist in the mesh. PULT has no transfer fee, so lock/unlock accounting is lossless.
-- `contracts/PultOFT.sol` — `OFT("Catapult Trade", "PULT", endpoint, delegate)` + LayerZero `Fee` mixin, 18 local / 6 shared
+- `contracts/PultOFT.sol` — `OFT("Catapult Trade", "PULT", endpoint, delegate)` + `PultFee`, 18 local / 6 shared
   decimals (`decimalConversionRate = 1e12`, sub-1e12-wei dust is stripped on send). No supply minted at deploy.
+- `contracts/PultFee.sol` — LayerZero's `Fee` (same `IFee` ABI and storage) with fees capped at 5 % (`MAX_FEE_BPS = 500`).
 - `test/mocks/*` — test-only subclasses exposing `mint` / `removeDust` (not compiled by Hardhat, never deployed).
 
 Invariant: PULT locked in `PultOFTAdapter` == `PultOFT(Robinhood).totalSupply()` + `PultOFT(Arbitrum).totalSupply()` +
@@ -34,12 +35,12 @@ Invariant: PULT locked in `PultOFTAdapter` == `PultOFT(Robinhood).totalSupply()`
 ## Bridge fee
 
 Both contracts carry the fee model of LayerZero's `OFTAdapterFeeUpgradeable` / `OFTFeeUpgradeable`, re-implemented on the
-non-upgradeable base (`@layerzerolabs/oft-evm/contracts/Fee.sol`). Fees are **0 by default**, so behaviour equals the default
-OFT until the owner sets one.
+non-upgradeable base (`contracts/PultFee.sol`, LayerZero's `Fee.sol` with a 5 % cap). Fees are **0 by default**, so
+behaviour equals the default OFT until the owner sets one. **No fee can exceed 5 %** (`InvalidBps` above 500 bps).
 
 | Call (owner only)                                | Effect                                                                |
 | ------------------------------------------------ | --------------------------------------------------------------------- |
-| `setDefaultFeeBps(bps)`                          | fee for every destination, in basis points (100 = 1%, max 10 000)     |
+| `setDefaultFeeBps(bps)`                          | fee for every destination, in basis points (100 = 1%, max 500 = 5%)   |
 | `setFeeBps(dstEid, bps, enabled)`                | per-destination override; `enabled=false` falls back to the default   |
 | `withdrawFees(to)`                               | pays out `feeBalance` (adapter: PULT on BSC; OFT: PULT on that chain) |
 | `getFee(dstEid, amount)` / `quoteOFT(sendParam)` | read the fee / the exact `amountReceivedLD` for a send                |
@@ -77,7 +78,7 @@ messaging DVNs on **all three** chains (metadata API, 2026-10-26): LayerZero Lab
 Superform, Frax, Nansen, Deutsche Telekom, Twinstake, ApeDVN. `Nethermind` is **not** usable: on BSC and Arbitrum it is
 only listed as an lzRead DVN, so name resolution fails. `layerzero.config.ts` requires `LayerZero Labs` + `Horizen` on
 every pathway; confirmations are the on-chain defaults (BSC → 20, Arbitrum → 20, Robinhood → 5); enforced `lzReceive` gas
-120k / 150k (profiled in `test/foundry/PultBridgeGas.t.sol`). See [AUDIT.md](AUDIT.md) for the trust model and review notes.
+200k / 250k (profiled in `test/foundry/PultBridgeGas.t.sol`, ≥ 25 % headroom). See [AUDIT.md](AUDIT.md) for the trust model and review notes.
 
 ## Setup
 
@@ -93,14 +94,18 @@ Requires Node >= 18 and [Foundry](https://book.getfoundry.sh/) for the Solidity 
 
 ```bash
 pnpm test              # forge test + hardhat test
-pnpm test:forge        # test/foundry/PultBridge*.t.sol (TestHelperOz5: real ULN, DVN and executor flow + gas profile)
+pnpm test:forge        # test/foundry/PultBridge*.t.sol (TestHelperOz5: real ULN, DVN and executor flow + gas profile + 3-chain mesh)
 pnpm test:hardhat      # test/hardhat/PultBridge.test.ts (EndpointV2Mock)
 ```
 
 Covered: token copy metadata and `claimERC20`, adapter/OFT constructor and peers, BSC → Robinhood lock+mint,
 Robinhood → BSC burn+unlock, full round trip, `permit` + send, dust removal, `SlippageExceeded`, missing allowance,
 unknown peer, compose message delivery, fuzzed supply invariant; fee configuration (default / per-eid / bounds / onlyOwner),
-fee on both directions, `quoteOFT`, fee + slippage, `withdrawFees`, fuzzed backing invariant with fees; `lzReceive` gas profile.
+fee on both directions, `quoteOFT`, fee + slippage, `withdrawFees`, fuzzed backing invariant with fees, 5 % fee cap;
+`lzReceive` gas profile; three-chain mesh (all 6 directions, sub-dust amounts, max fee + dust, fees after many transfers,
+fuzzed random walk with backing / custody / conservation invariants).
+
+Foundry: `curl -L https://foundry.paradigm.xyz | bash && foundryup`.
 
 ## Deploy
 
@@ -118,10 +123,28 @@ npx hardhat lz:deploy --networks robinhood,arbitrum --tags PultOFT --ci
 #    Signs transactions on every chain: the deployer (= owner/delegate) needs native gas on BSC, Robinhood and Arbitrum.
 npx hardhat lz:oapp:wire --oapp-config layerzero.config.ts
 
-# 3. Verify
-npx hardhat lz:oapp:peers:get --oapp-config layerzero.config.ts
-npx hardhat lz:oapp:config:get --oapp-config layerzero.config.ts
-npx hardhat lz:oapp:enforced-opts:get --oapp-config layerzero.config.ts
+# 3. Check the live config: fails on a missing peer, a dead/default DVN, wrong confirmations or enforced gas
+npx hardhat run scripts/checkConfig.ts      # LZ_CONFIG=layerzero.testnet.config.ts for testnet
+
+# 4. End-to-end on the live mesh (TEST_PRIVATE_KEY wallet: gas on all chains + >= 7 x E2E_AMOUNT PULT on BSC)
+E2E_AMOUNT=1 npx hardhat run scripts/e2e.ts
+```
+
+Do not announce the adapter address before step 3 passes: until wiring, the Robinhood pathways verify through
+LayerZero's dead DVN and a transfer would never be delivered.
+
+### Staging mesh on mainnet
+
+`DEPLOY_STAGE=staging` deploys a separate, throwaway mesh on the real chains (own adapter over the real PULT, own PultOFTs
+named "PULT Staging" / "PULT-STG"), recorded in `deployments-staging/` instead of `deployments/`. Same wiring config as
+production. Used for the live end-to-end run before the production deploy:
+
+```bash
+DEPLOY_STAGE=staging npx hardhat lz:deploy --networks bsc --tags PultOFTAdapter --ci
+DEPLOY_STAGE=staging npx hardhat lz:deploy --networks robinhood,arbitrum --tags PultOFT --ci
+DEPLOY_STAGE=staging npx hardhat lz:oapp:wire --oapp-config layerzero.config.ts --ci
+DEPLOY_STAGE=staging npx hardhat run scripts/checkConfig.ts
+DEPLOY_STAGE=staging E2E_AMOUNT=100 npx hardhat run scripts/e2e.ts
 ```
 
 The deploy scripts guard themselves: `PultOFTAdapter` only deploys on a network with an `oftAdapter.tokenAddress`
@@ -176,13 +199,14 @@ AMOUNT=0.5 npx hardhat run scripts/sendTest.ts --network arbitrum               
 ## Layout
 
 ```
-contracts/            CatapultTrade.sol, PultOFTAdapter.sol, PultOFT.sol
+contracts/            CatapultTrade.sol, PultOFTAdapter.sol, PultOFT.sol, PultFee.sol
 deploy/               CatapultTrade.ts, PultOFTAdapter.ts, PultOFT.ts (hardhat-deploy, run via lz:deploy)
-test/foundry/         PultBridge.t.sol, PultBridgeFee.t.sol, PultBridgeGas.t.sol
+test/foundry/         PultBridge.t.sol, PultBridgeFee.t.sol, PultBridgeGas.t.sol, PultBridgeMesh.t.sol
 test/hardhat/         PultBridge.test.ts
 test/mocks/           PultOFTMock.sol, PultOFTAdapterMock.sol, OFTComposerMock.sol
-scripts/              whoami.ts, sendTest.ts, setFee.ts, withdrawFees.ts
+scripts/              whoami.ts, sendTest.ts, setFee.ts, withdrawFees.ts, checkConfig.ts, e2e.ts
 deployments/          hardhat-deploy artifacts per network (created by lz:deploy, committed for wiring)
+deployments-staging/  the staging mesh on mainnet (DEPLOY_STAGE=staging)
 AUDIT.md              scope, trust model, internal review findings, pre-deploy checklist
 layerzero.config.ts   mainnet mesh (BSC <-> Robinhood <-> Arbitrum)
 layerzero.testnet.config.ts

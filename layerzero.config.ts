@@ -45,24 +45,25 @@ const DVNS: [string[], []] = [['LayerZero Labs', 'Horizen'], []]
  * Enforced options: minimum executor gas the *sender* must pay for `EndpointV2.lzReceive` on the destination
  * (the Executor forwards exactly this gas: Executor.execute302 -> lzReceive{ gas: gasLimit }).
  *
- * Profiled in test/foundry/PultBridgeGas.t.sol against the real endpoint + ULN:
- *   first-ever message on a pathway, mint to fresh recipient   ~79k
- *   first-ever message with compose, fresh recipient           ~100k  (+ endpoint.sendCompose)
- *   adapter unlock to fresh recipient                          ~58k
- * Values below keep >= 25% headroom. Over-provisioning is cheap; under-provisioning strands messages
- * until someone re-executes them manually with more gas.
+ * Profiled in test/foundry/PultBridgeGas.t.sol against the real endpoint + ULN (forge 1.8, 2026-10-27):
+ *   first-ever message on a pathway, mint to fresh recipient   ~117k
+ *   first-ever message with compose, fresh recipient           ~146k  (+ endpoint.sendCompose)
+ *   adapter unlock to fresh recipient                          ~103k
+ * The previous 120k / 150k left only ~3 % headroom on the first mint. Values below keep >= 25 % headroom (the gas
+ * test asserts it). Over-provisioning is cheap; under-provisioning strands messages until someone re-executes them
+ * manually with more gas.
  */
 const EVM_ENFORCED_OPTIONS: OAppEnforcedOption[] = [
     {
         msgType: 1, // SEND
         optionType: ExecutorOptionType.LZ_RECEIVE,
-        gas: 120_000,
+        gas: 200_000,
         value: 0,
     },
     {
         msgType: 2, // SEND_AND_CALL (compose)
         optionType: ExecutorOptionType.LZ_RECEIVE,
-        gas: 150_000,
+        gas: 250_000,
         value: 0,
     },
 ]

@@ -34,8 +34,8 @@ contract PultBridgeGasTest is TestHelperOz5 {
     uint32 private constant ROBINHOOD_EID = 2;
 
     // keep in sync with layerzero.config.ts
-    uint256 private constant ENFORCED_GAS_SEND = 120_000; // msgType 1
-    uint256 private constant ENFORCED_GAS_SEND_AND_CALL = 150_000; // msgType 2
+    uint256 private constant ENFORCED_GAS_SEND = 200_000; // msgType 1
+    uint256 private constant ENFORCED_GAS_SEND_AND_CALL = 250_000; // msgType 2
     uint256 private constant HEADROOM_BPS = 2_500; // require >= 25% spare gas
 
     CatapultTrade private pult;

@@ -5,7 +5,7 @@ import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import { Ownable } from "@openzeppelin/contracts/access/Ownable.sol";
 import { OFTAdapter } from "@layerzerolabs/oft-evm/contracts/OFTAdapter.sol";
-import { Fee } from "@layerzerolabs/oft-evm/contracts/Fee.sol";
+import { PultFee } from "./PultFee.sol";
 
 /**
  * @title PultOFTAdapter
@@ -15,7 +15,7 @@ import { Fee } from "@layerzerolabs/oft-evm/contracts/Fee.sol";
  * @dev Locks PULT on BSC and instructs the PultOFT peer on Robinhood Chain to mint the same amount
  *      (and unlocks PULT when the peer burns). PULT is a plain OpenZeppelin ERC20 (no transfer fee),
  *      so the lossless lock/unlock accounting is correct.
- * @dev Fee model mirrors LayerZero's `OFTAdapterFeeUpgradeable`:
+ * @dev Fee model mirrors LayerZero's `OFTAdapterFeeUpgradeable`, capped at 5 % (`PultFee.MAX_FEE_BPS`):
  *      - `defaultFeeBps` applies to every destination, `setFeeBps(dstEid, bps, enabled)` overrides per destination;
  *      - the fee (plus the de-dust remainder) is taken from the sender on the *source* chain and accumulated in
  *        `feeBalance`; `withdrawFees(to)` lets the owner pull only that balance, never the tokens backing the peer;
@@ -24,7 +24,7 @@ import { Fee } from "@layerzerolabs/oft-evm/contracts/Fee.sol";
  * @dev WARNING: exactly ONE OFTAdapter must exist for PULT across the whole LayerZero mesh.
  * @dev Token: 0x2eae2fef601c75d4ec24bdadb17fe6e3d910c154 (BSC mainnet).
  */
-contract PultOFTAdapter is OFTAdapter, Fee {
+contract PultOFTAdapter is OFTAdapter, PultFee {
     using SafeERC20 for IERC20;
 
     /// @notice Fees (in local decimals) accumulated in this contract and withdrawable by the owner.
