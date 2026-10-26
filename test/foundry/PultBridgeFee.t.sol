@@ -248,7 +248,8 @@ contract PultBridgeFeeTest is TestHelperOz5 {
         (OFTLimit memory limit, OFTFeeDetail[] memory details, OFTReceipt memory receipt) = adapter.quoteOFT(sp);
         assertEq(receipt.amountSentLD, amount);
         assertEq(receipt.amountReceivedLD, 3.9 ether);
-        assertEq(details.length, 0);
+        assertEq(details.length, 1);
+        assertEq(details[0].feeAmountLD, 0.1 ether);
         assertEq(limit.maxAmountLD, pult.totalSupply());
 
         // quoteSend uses the same view path and must not revert with minAmount below the net amount
@@ -272,7 +273,9 @@ contract PultBridgeFeeTest is TestHelperOz5 {
         vm.stopPrank();
     }
 
-    function test_zero_fee_matches_default_oft_behaviour() public {
+    /// @dev With no fee the only difference to the default OFT: the de-dust remainder goes to feeBalance, not back to
+    ///      the sender (LayerZero fee-OFT semantics).
+    function test_zero_fee_only_dust_accrues_to_fee_balance() public {
         uint256 amount = 5 ether + 1; // dust only
         OFTReceipt memory receipt = _bridgeToRobinhood(userA, userB, amount);
         assertEq(receipt.amountSentLD, amount);
@@ -375,7 +378,11 @@ contract PultBridgeFeeTest is TestHelperOz5 {
         _assertInvariant();
 
         uint256 back = r1.amountReceivedLD;
-        if (back >= CONVERSION_RATE) {
+        if (_expectedReceived(back, oftBps) == 0) {
+            // would deliver nothing: refused instead of moving the whole amount into feeBalance
+            vm.expectRevert(abi.encodeWithSelector(PultOFT.AmountTooSmall.selector, back));
+            oft.quoteOFT(_sendParam(BSC_EID, userA, back, 0));
+        } else {
             OFTReceipt memory r2 = _bridgeToBsc(userB, userA, back);
             assertEq(r2.amountReceivedLD, _expectedReceived(back, oftBps));
             assertEq(oft.feeBalance(), back - r2.amountReceivedLD);

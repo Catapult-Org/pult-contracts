@@ -4,6 +4,7 @@ import path from 'path'
 import { ethers } from 'ethers'
 import { config } from 'hardhat'
 
+import { EndpointId } from '@layerzerolabs/lz-definitions'
 import { Options } from '@layerzerolabs/lz-v2-utilities'
 
 /**
@@ -15,7 +16,10 @@ import { Options } from '@layerzerolabs/lz-v2-utilities'
  * ULN config for messages coming FROM B (that is what `receiveConfig` of the A -> B connection configures).
  * ULN configs are read through `EndpointV2.getConfig`, i.e. the EFFECTIVE config the protocol uses (OApp config
  * merged with defaults), so a left-over default such as LZDeadDVN shows up as a mismatch.
- * Also checks that every OApp's endpoint delegate is its owner.
+ * Also checks that every OApp's endpoint delegate is its owner, and that it has NO peers besides the declared ones:
+ * `peers(eid)` is read for every LayerZero V2 endpoint id of the same stage (mainnet 30xxx / testnet 40xxx) listed in
+ * @layerzerolabs/lz-definitions, so a stray peer (wrong eid, an old staging contract) fails the check. Current state
+ * only, so it works on any public RPC (no event history / archive access needed).
  *
  * Usage: LZ_CONFIG=layerzero.config.ts [DEPLOY_STAGE=staging] npx hardhat run scripts/checkConfig.ts
  */
@@ -31,6 +35,7 @@ const OAPP_ABI = [
     'function owner() view returns (address)',
     'function endpoint() view returns (address)',
 ]
+const V2_EIDS = [...new Set(Object.values(EndpointId).filter((x): x is number => typeof x === 'number'))]
 const CONFIG_TYPE_EXECUTOR = 1
 const CONFIG_TYPE_ULN = 2
 const ULN_TUPLE =
@@ -79,6 +84,23 @@ async function main() {
         return JSON.parse(fs.readFileSync(file, 'utf8')).address as string
     }
 
+    /** Live non-zero peers (eid -> peer) of `addr` over every V2 eid of the same stage as `eid`. */
+    const livePeers = async (eid: number, addr: string) => {
+        const oapp = new ethers.Contract(addr, OAPP_ABI, provider(eid))
+        const stage = Math.floor(eid / 10_000)
+        const candidates = V2_EIDS.filter((e) => Math.floor(e / 10_000) === stage)
+        const peers = new Map<number, string>()
+        for (let i = 0; i < candidates.length; i += 25) {
+            const batch = candidates.slice(i, i + 25)
+            const results: string[] = await Promise.all(batch.map((e) => oapp.peers(e)))
+            batch.forEach((e, j) => {
+                const peer = (results[j] ?? ethers.constants.HashZero).toLowerCase()
+                if (peer !== ethers.constants.HashZero) peers.set(e, peer)
+            })
+        }
+        return peers
+    }
+
     const failures: string[] = []
     const check = (ok: boolean, label: string, detail = '') => {
         console.log(`${ok ? '  ok  ' : '  FAIL'} ${label}${detail ? `: ${detail}` : ''}`)
@@ -96,6 +118,21 @@ async function main() {
         const [owner, delegate] = await Promise.all([oapp.owner(), endpoint.delegates(addr)])
         console.log(`${network(contract.eid).name} ${contract.contractName} ${addr} owner=${owner}`)
         check(owner === delegate, `  delegate == owner`, `${delegate}`)
+
+        // no peers besides the declared connections
+        const declared = new Map<number, string>()
+        for (const c of lzConfig.connections) {
+            if (c.from.eid === contract.eid && c.from.contractName === contract.contractName) {
+                declared.set(c.to.eid, ethers.utils.hexZeroPad(addressOf(c.to), 32).toLowerCase())
+            }
+        }
+        const live = await livePeers(contract.eid, addr)
+        const stray = [...live].filter(([eid, peer]) => declared.get(eid) !== peer)
+        check(
+            stray.length === 0,
+            `  no undeclared peers`,
+            stray.length ? stray.map(([eid, peer]) => `${eid}=${peer}`).join(', ') : `${declared.size} declared`
+        )
     }
 
     for (const { from, to, config: expected } of lzConfig.connections) {

@@ -12,14 +12,19 @@ import { artifacts, config } from 'hardhat'
  *
  * Flow (amounts in PULT, E2E_AMOUNT scales them, default 100):
  *   1. no fee:   BSC -> Robinhood 3x, BSC -> Arbitrum 3x, Robinhood -> Arbitrum 1x, Arbitrum -> Robinhood 0.5x
- *   2. fee cap:  owner cannot set 501 bps; 5 % on Arbitrum -> Robinhood, 1 % on BSC -> Arbitrum with a dusty amount
- *   3. fees:     owner withdraws all fee balances, resets fees to 0
+ *   2. guards:   owner cannot set 501 bps; recipient 0 / recipient == destination OApp / an amount that would deliver
+ *                nothing / withdrawFees(to == contract) all revert
+ *      fees:     5 % on Arbitrum -> Robinhood, 1 % on BSC -> Arbitrum with a dusty amount
+ *   3. fees:     owner withdraws all fee balances, resets fees to 0 (fees are also reset in a `finally` if any
+ *                stage 2-3 step fails, so an aborted run never leaves fees switched on)
  *   4. return:   everything (user balances and withdrawn OFT fees) is bridged back to BSC
  * After every delivered stage: backing invariant
  *   PULT.balanceOf(adapter) == supply(Robinhood) + supply(Arbitrum) + adapter.feeBalance
  * and exact balance checks (received == quoteOFT, fee == formula).
  *
- * Usage: DEPLOY_STAGE=staging NETWORKS=bsc,robinhood,arbitrum npx hardhat run scripts/e2e.ts
+ * Usage: DEPLOY_STAGE=staging NETWORKS=bsc,robinhood,arbitrum npx hardhat run scripts/e2e.ts   (or `pnpm e2e`)
+ * The script changes fees with the owner key, so it refuses to run against production (DEPLOY_STAGE unset) unless
+ * E2E_ALLOW_PRODUCTION=1 is set explicitly (e.g. the small post-deploy check before the bridge is announced).
  */
 const DELIVERY_TIMEOUT_MS = 30 * 60 * 1000
 // RPCs used only for eth_getLogs (delivery detection). bsc-dataseed rejects every eth_getLogs ("limit exceeded"),
@@ -48,6 +53,9 @@ function log(msg: string) {
 }
 
 async function main() {
+    if (!process.env.DEPLOY_STAGE && process.env.E2E_ALLOW_PRODUCTION !== '1') {
+        throw new Error('refusing to run against production: set DEPLOY_STAGE=staging, or E2E_ALLOW_PRODUCTION=1')
+    }
     const userKey = process.env.TEST_PRIVATE_KEY
     const ownerKey = process.env.PRIVATE_KEY || process.env.MAINNET_PRIVATE_KEY
     if (!userKey || !ownerKey) throw new Error('TEST_PRIVATE_KEY and PRIVATE_KEY must be set')
@@ -230,19 +238,23 @@ async function main() {
         const [a, b, c] = await Promise.all(chains.map((ch) => ch.token.balanceOf(ch.user.address)))
         return (a as BigNumber).add(b as BigNumber).add(c as BigNumber)
     }
-    // Reset fees left over from an interrupted run (default + the override this script uses).
-    for (const c of chains) {
-        if ((await c.app.defaultFeeBps()) !== 0) {
-            await ownerTx(`${c.name} default fee reset to 0`, async () =>
-                c.app.connect(c.owner).setDefaultFeeBps(0, await gas(c))
+    // Sets every fee this script touches back to 0 (default fees + the Arbitrum -> Robinhood override). Used at the
+    // start (leftovers from an interrupted run) and in the `finally` of stages 2-3.
+    const resetFees = async () => {
+        for (const c of chains) {
+            if ((await c.app.defaultFeeBps()) !== 0) {
+                await ownerTx(`${c.name} default fee reset to 0`, async () =>
+                    c.app.connect(c.owner).setDefaultFeeBps(0, await gas(c))
+                )
+            }
+        }
+        if ((await arbitrum.app.feeBps(robinhood.eid)).enabled) {
+            await ownerTx('Arbitrum fee override to Robinhood removed', async () =>
+                arbitrum.app.connect(arbitrum.owner).setFeeBps(robinhood.eid, 0, false, await gas(arbitrum))
             )
         }
     }
-    if ((await arbitrum.app.feeBps(robinhood.eid)).enabled) {
-        await ownerTx('Arbitrum fee override to Robinhood removed', async () =>
-            arbitrum.app.connect(arbitrum.owner).setFeeBps(robinhood.eid, 0, false, await gas(arbitrum))
-        )
-    }
+    await resetFees()
 
     await checkInvariant('start')
     const startTotal = await userTotal()
@@ -269,67 +281,106 @@ async function main() {
     }
     await checkInvariant('after Robinhood <-> Arbitrum')
 
-    // ------------------------------------------------------------------ 2. fee cap + fees
-    log('=== 2. fee cap and fees')
+    // ------------------------------------------------------------------ 2. guards, fee cap + fees
+    log('=== 2. guards, fee cap and fees')
+    /** Requires `call` to revert with the custom error `name` (checked by its 4-byte selector in the revert data). */
+    const expectRevert = async (
+        label: string,
+        iface: ethers.utils.Interface,
+        name: string,
+        call: () => Promise<unknown>
+    ) => {
+        const selector = iface.getSighash(name)
+        try {
+            await call()
+        } catch (e) {
+            if (JSON.stringify(e, Object.getOwnPropertyNames(e)).toLowerCase().includes(selector.slice(2))) return
+            throw new Error(`${label}: reverted, but not with ${name}: ${String((e as Error).message).slice(0, 200)}`)
+        }
+        throw new Error(`${label}: expected ${name}, call succeeded`)
+    }
     const maxFee: number = await arbitrum.app.MAX_FEE_BPS()
     if (maxFee !== 500) throw new Error(`MAX_FEE_BPS = ${maxFee}`)
+    const param = (dst: Chain, to: string, amount: BigNumber) => ({
+        dstEid: dst.eid,
+        to,
+        amountLD: amount,
+        minAmountLD: 0,
+        extraOptions: '0x',
+        composeMsg: '0x',
+        oftCmd: '0x',
+    })
+    const userTo = ethers.utils.hexZeroPad(bsc.user.address, 32)
     for (const c of chains) {
-        for (const call of [
-            () => c.app.connect(c.owner).callStatic.setDefaultFeeBps(maxFee + 1),
-            () => c.app.connect(c.owner).callStatic.setFeeBps(bsc.eid, maxFee + 1, true),
-        ]) {
-            let accepted = true
-            try {
-                await call()
-            } catch {
-                accepted = false
-            }
-            if (accepted) throw new Error(`${c.name}: fee above cap was accepted`)
-        }
-        log(`${c.name}: setDefaultFeeBps(${maxFee + 1}) / setFeeBps(.., ${maxFee + 1}) revert`)
+        const owner = c.app.connect(c.owner)
+        const dst = c === bsc ? robinhood : bsc
+        const iface = c.app.interface
+        await expectRevert(`${c.name} setDefaultFeeBps(501)`, iface, 'InvalidBps', () =>
+            owner.callStatic.setDefaultFeeBps(maxFee + 1)
+        )
+        await expectRevert(`${c.name} setFeeBps(.., 501)`, iface, 'InvalidBps', () =>
+            owner.callStatic.setFeeBps(dst.eid, maxFee + 1, true)
+        )
+        await expectRevert(`${c.name} recipient 0`, iface, 'InvalidRecipient', () =>
+            c.app.quoteSend(param(dst, ethers.constants.HashZero, unit), false)
+        )
+        await expectRevert(`${c.name} recipient == ${dst.name} OApp`, iface, 'InvalidRecipient', () =>
+            c.app.quoteSend(param(dst, ethers.utils.hexZeroPad(dst.app.address, 32), unit), false)
+        )
+        await expectRevert(`${c.name} amount < 1e12 wei`, iface, 'AmountTooSmall', () =>
+            c.app.quoteOFT(param(dst, userTo, BigNumber.from(10).pow(12).sub(1)))
+        )
+        await expectRevert(`${c.name} withdrawFees(this)`, iface, 'InvalidRecipient', () =>
+            owner.callStatic.withdrawFees(c.app.address)
+        )
+        log(`${c.name}: fee > 5 %, recipient 0 / OApp, sub-unit amount, withdrawFees(this) all revert`)
     }
 
-    await ownerTx('Arbitrum fee to Robinhood = 500 bps', async () =>
-        arbitrum.app.connect(arbitrum.owner).setFeeBps(robinhood.eid, maxFee, true, await gas(arbitrum))
-    )
-    await ownerTx('BSC default fee = 100 bps', async () =>
-        bsc.app.connect(bsc.owner).setDefaultFeeBps(100, await gas(bsc))
-    )
-
-    const dusty = unit.add(123_456_789) // < 1e12 wei of dust on top
     const removeDust = (x: BigNumber) => x.div(1e12).mul(1e12)
-    const expectArb = removeDust(unit.sub(unit.mul(maxFee).div(BPS)))
-    const expectBsc = removeDust(dusty.sub(dusty.mul(100).div(BPS)))
-    const arbFeesBefore: BigNumber = await arbitrum.app.feeBalance()
-    const adapterFeesBefore: BigNumber = await bsc.app.feeBalance()
-    await deliver([
-        await send(arbitrum, robinhood, unit, { expectedReceived: expectArb }),
-        await send(bsc, arbitrum, dusty, { expectedReceived: expectBsc }),
-    ])
-    const arbFee = (await arbitrum.app.feeBalance()).sub(arbFeesBefore)
-    const adapterFee = (await bsc.app.feeBalance()).sub(adapterFeesBefore)
-    if (!arbFee.eq(unit.sub(expectArb))) throw new Error(`Arbitrum fee ${fmt(arbFee)}`)
-    if (!adapterFee.eq(dusty.sub(expectBsc))) throw new Error(`adapter fee ${fmt(adapterFee)}`)
-    log(`fees charged: Arbitrum ${fmt(arbFee)} (5 %), BSC adapter ${fmt(adapterFee)} (1 % + dust)`)
-    await checkInvariant('after fees')
 
-    // ------------------------------------------------------------------ 3. withdraw + reset fees
-    log('=== 3. withdraw fees, reset to 0')
-    const withdrawn: Record<string, BigNumber> = {}
-    for (const c of chains) {
-        const bal: BigNumber = await c.app.feeBalance()
-        withdrawn[c.name] = bal
-        if (bal.gt(0)) {
-            await ownerTx(`${c.name} withdrawFees ${fmt(bal)}`, async () =>
-                c.app.connect(c.owner).withdrawFees(c.owner.address, await gas(c))
-            )
+    // Fees are switched on from here: always switch them off again, also when a step below throws.
+    let arbFee = BigNumber.from(0)
+    let adapterFee = BigNumber.from(0)
+    try {
+        await ownerTx('Arbitrum fee to Robinhood = 500 bps', async () =>
+            arbitrum.app.connect(arbitrum.owner).setFeeBps(robinhood.eid, maxFee, true, await gas(arbitrum))
+        )
+        await ownerTx('BSC default fee = 100 bps', async () =>
+            bsc.app.connect(bsc.owner).setDefaultFeeBps(100, await gas(bsc))
+        )
+
+        const dusty = unit.add(123_456_789) // < 1e12 wei of dust on top
+        const expectArb = removeDust(unit.sub(unit.mul(maxFee).div(BPS)))
+        const expectBsc = removeDust(dusty.sub(dusty.mul(100).div(BPS)))
+        const arbFeesBefore: BigNumber = await arbitrum.app.feeBalance()
+        const adapterFeesBefore: BigNumber = await bsc.app.feeBalance()
+        await deliver([
+            await send(arbitrum, robinhood, unit, { expectedReceived: expectArb }),
+            await send(bsc, arbitrum, dusty, { expectedReceived: expectBsc }),
+        ])
+        arbFee = (await arbitrum.app.feeBalance()).sub(arbFeesBefore)
+        adapterFee = (await bsc.app.feeBalance()).sub(adapterFeesBefore)
+        if (!arbFee.eq(unit.sub(expectArb))) throw new Error(`Arbitrum fee ${fmt(arbFee)}`)
+        if (!adapterFee.eq(dusty.sub(expectBsc))) throw new Error(`adapter fee ${fmt(adapterFee)}`)
+        log(`fees charged: Arbitrum ${fmt(arbFee)} (5 %), BSC adapter ${fmt(adapterFee)} (1 % + dust)`)
+        await checkInvariant('after fees')
+
+        // ------------------------------------------------------------------ 3. withdraw + reset fees
+        log('=== 3. withdraw fees, reset to 0')
+        const withdrawn: Record<string, BigNumber> = {}
+        for (const c of chains) {
+            const bal: BigNumber = await c.app.feeBalance()
+            withdrawn[c.name] = bal
+            if (bal.gt(0)) {
+                await ownerTx(`${c.name} withdrawFees ${fmt(bal)}`, async () =>
+                    c.app.connect(c.owner).withdrawFees(c.owner.address, await gas(c))
+                )
+            }
+            if (!(await c.app.feeBalance()).isZero()) throw new Error(`${c.name}: feeBalance not zero after withdraw`)
         }
-        if (!(await c.app.feeBalance()).isZero()) throw new Error(`${c.name}: feeBalance not zero after withdraw`)
+    } finally {
+        await resetFees()
     }
-    await ownerTx('Arbitrum fee override removed', async () =>
-        arbitrum.app.connect(arbitrum.owner).setFeeBps(robinhood.eid, 0, false, await gas(arbitrum))
-    )
-    await ownerTx('BSC default fee = 0', async () => bsc.app.connect(bsc.owner).setDefaultFeeBps(0, await gas(bsc)))
     await checkInvariant('after withdraw')
     if (
         !(await bsc.token.balanceOf(bsc.app.address)).eq(

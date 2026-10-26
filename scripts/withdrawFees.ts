@@ -10,6 +10,11 @@ async function main() {
     const name = isHome ? 'PultOFTAdapter' : 'PultOFT'
     const oft = await ethers.getContractAt(name, (await deployments.get(name)).address, signer)
     const to = process.env.TO ?? signer.address
+    // The contracts reject these too (InvalidRecipient); fail before spending gas.
+    if (!ethers.utils.isAddress(to)) throw new Error(`TO=${to} is not an address`)
+    if (to === ethers.constants.AddressZero || to.toLowerCase() === oft.address.toLowerCase()) {
+        throw new Error('TO must not be the zero address or the bridge contract itself')
+    }
 
     const balance = await oft.feeBalance()
     console.log(

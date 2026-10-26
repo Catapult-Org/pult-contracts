@@ -273,6 +273,32 @@ describe('PULT bridge: PultOFTAdapter (BSC) <-> PultOFT (Robinhood, Arbitrum)', 
         }
     })
 
+    it('rejects invalid recipients, sends that deliver nothing and withdrawing fees to itself', async function () {
+        const amount = ethers.utils.parseEther('1')
+        // recipient 0 and recipient == destination OApp
+        await expectRevert(
+            adapter.quoteOFT([eidRobinhood, ethers.constants.HashZero, amount, 0, options, '0x', '0x']),
+            'InvalidRecipient'
+        )
+        await expectRevert(adapter.quoteSend(sendParam(eidRobinhood, oft.address, amount), false), 'InvalidRecipient')
+        await expectRevert(adapter.quoteSend(sendParam(eidArbitrum, oftArb.address, amount), false), 'InvalidRecipient')
+        // below one shared-decimal unit nothing would arrive
+        const tiny = ethers.BigNumber.from(10).pow(12).sub(1)
+        await expectRevert(
+            adapter.quoteOFT([eidRobinhood, ethers.utils.zeroPad(userB.address, 32), tiny, 0, options, '0x', '0x']),
+            'AmountTooSmall'
+        )
+        // withdrawFees(to == contract / zero)
+        await adapter.connect(deployer).setDefaultFeeBps(100)
+        const withFee = [eidRobinhood, ethers.utils.zeroPad(userB.address, 32), amount, 0, options, '0x', '0x']
+        const [nativeFee] = await adapter.quoteSend(withFee, false)
+        await pult.connect(userA).approve(adapter.address, amount)
+        await adapter.connect(userA).send(withFee, [nativeFee, 0], userA.address, { value: nativeFee })
+        expect(await adapter.feeBalance()).eql(ethers.utils.parseEther('0.01'))
+        await expectRevert(adapter.connect(deployer).withdrawFees(adapter.address), 'InvalidRecipient')
+        await expectRevert(adapter.connect(deployer).withdrawFees(ethers.constants.AddressZero), 'InvalidRecipient')
+    })
+
     it('applies per-destination fees only to the configured destination', async function () {
         await adapter.connect(deployer).setFeeBps(eidArbitrum, 50, true) // 0.5% BSC -> Arbitrum only
         const amount = ethers.utils.parseEther('10')

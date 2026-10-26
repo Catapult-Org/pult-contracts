@@ -36,11 +36,17 @@ const deploy: DeployFunction = async (hre) => {
 
 deploy.tags = [contractName]
 
-// Skip when the network already points the adapter at an existing token (mainnet).
+// Test token only: deploy it on testnets / local networks that have no PULT yet, never on a mainnet. Without this,
+// an untagged `lz:deploy` ("all deploy scripts") on robinhood / arbitrum would mint a second 1 B "PULT" there.
+const TEST_NETWORK = /(^hardhat$|^localhost$|testnet|sepolia)/
 deploy.skip = async (hre) => {
     const tokenAddress = hre.network.config.oftAdapter?.tokenAddress
     if (tokenAddress) {
         console.log(`${contractName}: token already exists at ${tokenAddress} on ${hre.network.name}, skipping`)
+        return true
+    }
+    if (!TEST_NETWORK.test(hre.network.name)) {
+        console.log(`${contractName}: ${hre.network.name} is not a test network, skipping`)
         return true
     }
     return false

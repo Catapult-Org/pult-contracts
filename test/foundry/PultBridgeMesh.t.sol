@@ -199,16 +199,20 @@ contract PultBridgeMeshTest is TestHelperOz5 {
 
     // ------------------------------------------------------------------ fee + dust edge cases
 
-    function test_amount_below_dust_goes_entirely_to_fee_balance() public {
-        uint256 tiny = CONVERSION_RATE - 1; // < 1 shared-decimal unit
-        OFTReceipt memory r = _bridge(BSC_EID, ARBITRUM_EID, userA, userB, tiny);
+    function test_amount_below_dust_is_rejected() public {
+        uint256 tiny = CONVERSION_RATE - 1; // < 1 shared-decimal unit: nothing would arrive
+        uint256 before = pult.balanceOf(userA);
+        vm.expectRevert(abi.encodeWithSelector(PultOFTAdapter.AmountTooSmall.selector, tiny));
+        this.bridgeExternal(BSC_EID, ARBITRUM_EID, userA, userB, tiny);
 
-        assertEq(r.amountSentLD, tiny);
-        assertEq(r.amountReceivedLD, 0);
-        assertEq(oftArbitrum.balanceOf(userB), 0);
-        assertEq(adapter.feeBalance(), tiny);
-        assertEq(pult.balanceOf(address(adapter)), tiny);
+        assertEq(pult.balanceOf(userA), before);
+        assertEq(adapter.feeBalance(), 0);
+        assertEq(pult.balanceOf(address(adapter)), 0);
         _assertInvariants();
+    }
+
+    function bridgeExternal(uint32 src, uint32 dst, address from, address to, uint256 amount) external {
+        _bridge(src, dst, from, to, amount);
     }
 
     function test_max_fee_with_dust_exact_accounting() public {
@@ -300,11 +304,19 @@ contract PultBridgeMeshTest is TestHelperOz5 {
             // amounts from 1 wei (pure dust) to the full balance
             uint256 amount = 1 + ((r >> 32) % bal);
 
+            uint16 bps = PultOFTFeeView(address(_app(src))).defaultFeeBps();
+            if (_expectedReceived(amount, bps) == 0) {
+                // would deliver nothing: must be refused with nothing moved
+                vm.expectRevert();
+                this.bridgeExternal(src, dst, from, to, amount);
+                _assertInvariants();
+                continue;
+            }
+
             uint256 dstBefore = _balance(dst, to);
             uint256 locked = pult.balanceOf(address(adapter));
             OFTReceipt memory receipt = _bridge(src, dst, from, to, amount);
 
-            uint16 bps = PultOFTFeeView(address(_app(src))).defaultFeeBps();
             assertEq(receipt.amountReceivedLD, _expectedReceived(amount, bps), "received == formula");
             if (dst != BSC_EID || to != address(adapter)) {
                 assertEq(_balance(dst, to), dstBefore + receipt.amountReceivedLD, "recipient credited");
