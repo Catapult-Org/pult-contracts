@@ -36,6 +36,13 @@ if (accounts == null) {
  */
 export const PULT_TOKEN_BSC = '0x2eae2fef601c75d4ec24bdadb17fe6e3d910c154'
 
+// Robinhood Chain is verified on Blockscout, every other network on Etherscan v2.
+// The config is evaluated before Hardhat resolves the network, so read it from the CLI / HARDHAT_NETWORK.
+const networkArgIndex = process.argv.indexOf('--network')
+const SELECTED_NETWORK =
+    process.env.HARDHAT_NETWORK ?? (networkArgIndex >= 0 ? process.argv[networkArgIndex + 1] : undefined)
+const VERIFY_ON_BLOCKSCOUT = SELECTED_NETWORK === 'robinhood' || SELECTED_NETWORK === 'robinhood-testnet'
+
 const config: HardhatUserConfig = {
     paths: {
         cache: 'cache/hardhat',
@@ -87,6 +94,12 @@ const config: HardhatUserConfig = {
             chainId: 4663,
             accounts,
         },
+        arbitrum: {
+            eid: EndpointId.ARBITRUM_V2_MAINNET, // 30110
+            url: process.env.RPC_URL_ARBITRUM || 'https://arb1.arbitrum.io/rpc',
+            chainId: 42161,
+            accounts,
+        },
         // ---------------------------------------------------------------- testnet
         'bsc-testnet': {
             eid: EndpointId.BSC_V2_TESTNET, // 40102
@@ -105,6 +118,12 @@ const config: HardhatUserConfig = {
             chainId: 46630,
             accounts,
         },
+        'arbitrum-sepolia': {
+            eid: EndpointId.ARBSEP_V2_TESTNET, // 40231
+            url: process.env.RPC_URL_ARBITRUM_SEPOLIA || 'https://sepolia-rollup.arbitrum.io/rpc',
+            chainId: 421614,
+            accounts,
+        },
         hardhat: {
             // TestHelperOz5 / EndpointV2Mock exceed the contract size limit
             allowUnlimitedContractSize: true,
@@ -115,13 +134,15 @@ const config: HardhatUserConfig = {
             default: 0,
         },
     },
+    // BSC + Arbitrum (main/testnets): one Etherscan v2 key (a string key selects the v2 multichain API; the per-network
+    // key object selects the v1 explorer APIs, which Etherscan shut down in 2025).
+    // Robinhood Chain: Blockscout, no key. Exactly one verifier is enabled for the selected network.
     etherscan: {
-        apiKey: {
-            bsc: process.env.BSCSCAN_API_KEY || '',
-            bscTestnet: process.env.BSCSCAN_API_KEY || '',
-            robinhood: 'blockscout',
-            'robinhood-testnet': 'blockscout',
-        },
+        enabled: !VERIFY_ON_BLOCKSCOUT,
+        apiKey: process.env.ETHERSCAN_API_KEY || process.env.BSCSCAN_API_KEY || '',
+    },
+    blockscout: {
+        enabled: VERIFY_ON_BLOCKSCOUT,
         customChains: [
             {
                 network: 'robinhood',

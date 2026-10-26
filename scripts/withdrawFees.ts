@@ -6,7 +6,7 @@ import { deployments, ethers, network } from 'hardhat'
  */
 async function main() {
     const [signer] = await ethers.getSigners()
-    const isHome = network.name === 'bsc' || network.name === 'bsc-testnet'
+    const isHome = network.config.oftAdapter != null
     const name = isHome ? 'PultOFTAdapter' : 'PultOFT'
     const oft = await ethers.getContractAt(name, (await deployments.get(name)).address, signer)
     const to = process.env.TO ?? signer.address

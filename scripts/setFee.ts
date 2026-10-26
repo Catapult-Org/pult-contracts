@@ -1,7 +1,8 @@
 import { deployments, ethers, network } from 'hardhat'
 
 /**
- * Sets the bridge fee on the local OFT contract (PultOFTAdapter on BSC, PultOFT elsewhere).
+ * Sets the bridge fee on the local OFT contract (PultOFTAdapter on BSC, PultOFT on Robinhood / Arbitrum).
+ * Destination eids: BSC 30102, Robinhood 30416, Arbitrum 30110.
  *   FEE_BPS=100                      -> setDefaultFeeBps(100)            (1% for every destination)
  *   FEE_BPS=50 DST_EID=30416         -> setFeeBps(30416, 50, true)       (override for one destination)
  *   FEE_BPS=0  DST_EID=30416 ENABLED=false -> setFeeBps(30416, 0, false) (remove the override)
@@ -9,7 +10,7 @@ import { deployments, ethers, network } from 'hardhat'
  */
 async function main() {
     const [signer] = await ethers.getSigners()
-    const isHome = network.name === 'bsc' || network.name === 'bsc-testnet'
+    const isHome = network.config.oftAdapter != null
     const name = isHome ? 'PultOFTAdapter' : 'PultOFT'
     const oft = await ethers.getContractAt(name, (await deployments.get(name)).address, signer)
 

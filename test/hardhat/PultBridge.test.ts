@@ -6,13 +6,15 @@ import { deployments, ethers } from 'hardhat'
 import { Options } from '@layerzerolabs/lz-v2-utilities'
 
 /**
- * Mesh under test (EndpointV2Mock, no DVN/executor):
+ * Full mesh under test (EndpointV2Mock, no DVN/executor):
  *   eidBsc       -> CatapultTrade (PULT) + PultOFTAdapter
  *   eidRobinhood -> PultOFT
+ *   eidArbitrum  -> PultOFT
  */
-describe('PULT bridge: PultOFTAdapter (BSC) <-> PultOFT (Robinhood)', function () {
+describe('PULT bridge: PultOFTAdapter (BSC) <-> PultOFT (Robinhood, Arbitrum)', function () {
     const eidBsc = 1
     const eidRobinhood = 2
+    const eidArbitrum = 3
 
     let CatapultTrade: ContractFactory
     let PultOFTAdapter: ContractFactory
@@ -27,8 +29,10 @@ describe('PULT bridge: PultOFTAdapter (BSC) <-> PultOFT (Robinhood)', function (
     let pult: Contract
     let adapter: Contract
     let oft: Contract
+    let oftArb: Contract
     let endpointBsc: Contract
     let endpointRobinhood: Contract
+    let endpointArbitrum: Contract
 
     const options = Options.newOptions().addExecutorLzReceiveOption(200000, 0).toHex().toString()
     const TOTAL_SUPPLY = ethers.utils.parseEther('1000000000')
@@ -59,16 +63,26 @@ describe('PULT bridge: PultOFTAdapter (BSC) <-> PultOFT (Robinhood)', function (
     beforeEach(async function () {
         endpointBsc = await EndpointV2Mock.deploy(eidBsc)
         endpointRobinhood = await EndpointV2Mock.deploy(eidRobinhood)
+        endpointArbitrum = await EndpointV2Mock.deploy(eidArbitrum)
 
         pult = await CatapultTrade.deploy(deployer.address, deployer.address)
         adapter = await PultOFTAdapter.deploy(pult.address, endpointBsc.address, deployer.address)
         oft = await PultOFT.deploy('Catapult Trade', 'PULT', endpointRobinhood.address, deployer.address)
+        oftArb = await PultOFT.deploy('Catapult Trade', 'PULT', endpointArbitrum.address, deployer.address)
 
-        await endpointBsc.setDestLzEndpoint(oft.address, endpointRobinhood.address)
-        await endpointRobinhood.setDestLzEndpoint(adapter.address, endpointBsc.address)
-
-        await adapter.connect(deployer).setPeer(eidRobinhood, ethers.utils.zeroPad(oft.address, 32))
-        await oft.connect(deployer).setPeer(eidBsc, ethers.utils.zeroPad(adapter.address, 32))
+        // Every endpoint must know where each remote OApp lives (full mesh)
+        const apps: [Contract, Contract, number][] = [
+            [adapter, endpointBsc, eidBsc],
+            [oft, endpointRobinhood, eidRobinhood],
+            [oftArb, endpointArbitrum, eidArbitrum],
+        ]
+        for (const [app, endpoint, eid] of apps) {
+            for (const [remoteApp, remoteEndpoint, remoteEid] of apps) {
+                if (remoteEid === eid) continue
+                await endpoint.setDestLzEndpoint(remoteApp.address, remoteEndpoint.address)
+                await app.connect(deployer).setPeer(remoteEid, ethers.utils.zeroPad(remoteApp.address, 32))
+            }
+        }
 
         await pult.transfer(userA.address, ethers.utils.parseEther('100'))
     })
@@ -184,5 +198,92 @@ describe('PULT bridge: PultOFTAdapter (BSC) <-> PultOFT (Robinhood)', function (
         expect(await pult.balanceOf(userB.address)).eql(tokensToSend.sub(expected))
         expect(await adapter.feeBalance()).eql(ethers.BigNumber.from(0))
         expect(await pult.balanceOf(adapter.address)).eql(expected)
+    })
+
+    const bridge = async (
+        app: Contract,
+        from: SignerWithAddress,
+        dstEid: number,
+        to: string,
+        amount: ReturnType<typeof ethers.utils.parseEther>
+    ) => {
+        const params = sendParam(dstEid, to, amount)
+        const [nativeFee] = await app.quoteSend(params, false)
+        if (app.address === adapter.address) await pult.connect(from).approve(adapter.address, amount)
+        await app.connect(from).send(params, [nativeFee, 0], from.address, { value: nativeFee })
+    }
+
+    // Backing invariant over the whole mesh
+    const expectBacked = async () => {
+        const remoteSupply = (await oft.totalSupply()).add(await oftArb.totalSupply())
+        expect(await pult.balanceOf(adapter.address)).eql(remoteSupply.add(await adapter.feeBalance()))
+    }
+
+    it('locks PULT on BSC and mints PultOFT on Arbitrum', async function () {
+        const amount = ethers.utils.parseEther('3')
+        await bridge(adapter, userA, eidArbitrum, userB.address, amount)
+
+        expect(await oftArb.balanceOf(userB.address)).eql(amount)
+        expect(await oftArb.totalSupply()).eql(amount)
+        expect(await oft.totalSupply()).eql(ethers.BigNumber.from(0))
+        await expectBacked()
+    })
+
+    it('moves PultOFT directly between Robinhood and Arbitrum without touching BSC', async function () {
+        const amount = ethers.utils.parseEther('10')
+        await bridge(adapter, userA, eidRobinhood, userB.address, amount)
+        const locked = await pult.balanceOf(adapter.address)
+
+        const hop = ethers.utils.parseEther('6')
+        await bridge(oft, userB, eidArbitrum, userA.address, hop)
+        expect(await oft.totalSupply()).eql(amount.sub(hop))
+        expect(await oftArb.balanceOf(userA.address)).eql(hop)
+
+        const back = ethers.utils.parseEther('2')
+        await bridge(oftArb, userA, eidRobinhood, userB.address, back)
+        expect(await oftArb.totalSupply()).eql(hop.sub(back))
+        expect(await oft.balanceOf(userB.address)).eql(amount.sub(hop).add(back))
+
+        expect(await pult.balanceOf(adapter.address)).eql(locked)
+        await expectBacked()
+    })
+
+    it('burns PultOFT on Arbitrum and unlocks PULT on BSC', async function () {
+        const amount = ethers.utils.parseEther('5')
+        await bridge(adapter, userA, eidArbitrum, userB.address, amount)
+
+        const before = await pult.balanceOf(userB.address)
+        const back = ethers.utils.parseEther('5')
+        await bridge(oftArb, userB, eidBsc, userB.address, back)
+
+        expect(await oftArb.totalSupply()).eql(ethers.BigNumber.from(0))
+        expect(await pult.balanceOf(userB.address)).eql(before.add(back))
+        expect(await pult.balanceOf(adapter.address)).eql(ethers.BigNumber.from(0))
+        await expectBacked()
+    })
+
+    it('applies per-destination fees only to the configured destination', async function () {
+        await adapter.connect(deployer).setFeeBps(eidArbitrum, 50, true) // 0.5% BSC -> Arbitrum only
+        const amount = ethers.utils.parseEther('10')
+
+        const toArb = sendParam(eidArbitrum, userB.address, amount)
+        toArb[3] = 0
+        const [, , arbReceipt] = await adapter.quoteOFT(toArb)
+        expect(arbReceipt.amountReceivedLD).eql(ethers.utils.parseEther('9.95'))
+
+        const toRobinhood = sendParam(eidRobinhood, userB.address, amount)
+        const [, , rhReceipt] = await adapter.quoteOFT(toRobinhood)
+        expect(rhReceipt.amountReceivedLD).eql(amount)
+
+        toArb[3] = arbReceipt.amountReceivedLD
+        const [nativeFee] = await adapter.quoteSend(toArb, false)
+        await pult.connect(userA).approve(adapter.address, amount)
+        await adapter.connect(userA).send(toArb, [nativeFee, 0], userA.address, { value: nativeFee })
+        await bridge(adapter, userA, eidRobinhood, userB.address, amount)
+
+        expect(await oftArb.balanceOf(userB.address)).eql(ethers.utils.parseEther('9.95'))
+        expect(await oft.balanceOf(userB.address)).eql(amount)
+        expect(await adapter.feeBalance()).eql(ethers.utils.parseEther('0.05'))
+        await expectBacked()
     })
 })

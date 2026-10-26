@@ -7,6 +7,10 @@ PULT token and its LayerZero V2 omnichain bridge.
 | BSC (eid `30102`)                              | [`CatapultTrade`](contracts/CatapultTrade.sol)   | Existing PULT ERC20: [`0x2eae2fef601c75d4ec24bdadb17fe6e3d910c154`](https://bscscan.com/address/0x2eae2fef601c75d4ec24bdadb17fe6e3d910c154) |
 | BSC (eid `30102`)                              | [`PultOFTAdapter`](contracts/PultOFTAdapter.sol) | LayerZero **OFTAdapter** with optional fee: locks / unlocks PULT                                                                            |
 | Robinhood Chain (eid `30416`, chain id `4663`) | [`PultOFT`](contracts/PultOFT.sol)               | LayerZero **OFT** with optional fee: mints / burns PULT                                                                                     |
+| Arbitrum One (eid `30110`, chain id `42161`)   | [`PultOFT`](contracts/PultOFT.sol)               | LayerZero **OFT** with optional fee: mints / burns PULT (same contract as Robinhood)                                                        |
+
+Full mesh: every pair of chains is wired directly. Robinhood ↔ Arbitrum burns on one side and mints on the other without
+touching BSC. BSC stays the only chain holding real PULT; there is exactly one adapter.
 
 Built on the official LayerZero `create-lz-oapp` stack: Hardhat 2 + `hardhat-deploy` + `@layerzerolabs/toolbox-hardhat` for
 deploy/wiring, Foundry + `TestHelperOz5` for tests.
@@ -24,7 +28,8 @@ deploy/wiring, Foundry + `TestHelperOz5` for tests.
   decimals (`decimalConversionRate = 1e12`, sub-1e12-wei dust is stripped on send). No supply minted at deploy.
 - `test/mocks/*` — test-only subclasses exposing `mint` / `removeDust` (not compiled by Hardhat, never deployed).
 
-Invariant: PULT locked in `PultOFTAdapter` == `PultOFT.totalSupply()` + `PultOFTAdapter.feeBalance()`.
+Invariant: PULT locked in `PultOFTAdapter` == `PultOFT(Robinhood).totalSupply()` + `PultOFT(Arbitrum).totalSupply()` +
+`PultOFTAdapter.feeBalance()`.
 
 ## Bridge fee
 
@@ -32,12 +37,12 @@ Both contracts carry the fee model of LayerZero's `OFTAdapterFeeUpgradeable` / `
 non-upgradeable base (`@layerzerolabs/oft-evm/contracts/Fee.sol`). Fees are **0 by default**, so behaviour equals the default
 OFT until the owner sets one.
 
-| Call (owner only)                                | Effect                                                               |
-| ------------------------------------------------ | -------------------------------------------------------------------- |
-| `setDefaultFeeBps(bps)`                          | fee for every destination, in basis points (100 = 1%, max 10 000)    |
-| `setFeeBps(dstEid, bps, enabled)`                | per-destination override; `enabled=false` falls back to the default  |
-| `withdrawFees(to)`                               | pays out `feeBalance` (adapter: PULT on BSC; OFT: PULT on Robinhood) |
-| `getFee(dstEid, amount)` / `quoteOFT(sendParam)` | read the fee / the exact `amountReceivedLD` for a send               |
+| Call (owner only)                                | Effect                                                                |
+| ------------------------------------------------ | --------------------------------------------------------------------- |
+| `setDefaultFeeBps(bps)`                          | fee for every destination, in basis points (100 = 1%, max 10 000)     |
+| `setFeeBps(dstEid, bps, enabled)`                | per-destination override; `enabled=false` falls back to the default   |
+| `withdrawFees(to)`                               | pays out `feeBalance` (adapter: PULT on BSC; OFT: PULT on that chain) |
+| `getFee(dstEid, amount)` / `quoteOFT(sendParam)` | read the fee / the exact `amountReceivedLD` for a send                |
 
 Mechanics: on `send`, `amountSentLD` is the full amount, the fee is taken **before** de-dusting,
 `amountReceivedLD = removeDust(amount - fee)`, and fee + dust accrue to `feeBalance`. The adapter keeps the fee locked
@@ -48,6 +53,7 @@ round trip pays the adapter fee going out and the OFT fee coming back.
 ```bash
 FEE_BPS=100 npx hardhat run scripts/setFee.ts --network bsc                 # 1% on BSC -> Robinhood
 FEE_BPS=50 DST_EID=30102 npx hardhat run scripts/setFee.ts --network robinhood  # 0.5% override Robinhood -> BSC
+FEE_BPS=30 DST_EID=30110 npx hardhat run scripts/setFee.ts --network bsc        # 0.3% override BSC -> Arbitrum
 TO=0xTreasury npx hardhat run scripts/withdrawFees.ts --network bsc
 ```
 
@@ -57,25 +63,30 @@ TO=0xTreasury npx hardhat run scripts/withdrawFees.ts --network bsc
 | ----------------- | -------- | ----- | -------------------------------------------- |
 | BSC mainnet       | 56       | 30102 | `0x1a44076050125825900e736c501f859c50fE728c` |
 | Robinhood mainnet | 4663     | 30416 | `0x6F475642a6e85809B1c36Fa62763669b1b48DD5B` |
+| Arbitrum One      | 42161    | 30110 | `0x1a44076050125825900e736c501f859c50fE728c` |
 | BSC testnet       | 97       | 40102 | `0x6EDCE65403992e310A62460808c4b910D972f10f` |
 | Robinhood testnet | 46630    | 40451 | `0x3aCAAf60502791D199a5a5F0B173D78229eBFe32` |
+| Arbitrum Sepolia  | 421614   | 40231 | `0x6EDCE65403992e310A62460808c4b910D972f10f` |
 
 The endpoint addresses are resolved automatically by `@layerzerolabs/toolbox-hardhat` from the `eid` set on each network in
 `hardhat.config.ts`; nothing has to be hardcoded.
 
-**The on-chain default DVN for BSC↔Robinhood is `LZDeadDVN` on both sides**: LayerZero provides no default security stack for
-this pathway, so `lz:oapp:wire` with explicit DVNs is mandatory. DVNs available on **both** chains include LayerZero Labs,
-Nethermind, Horizen, BitGo, Paxos, Luganodes, P2P, Canary, Superform, Frax, Nansen. `layerzero.config.ts` requires
-`LayerZero Labs` + `Nethermind`, confirmations `[20, 5]` (on-chain defaults), enforced `lzReceive` gas 120k / 150k
-(profiled in `test/foundry/PultBridgeGas.t.sol`). See [AUDIT.md](AUDIT.md) for the trust model and review notes.
+**The on-chain default DVN of both Robinhood pathways (BSC↔Robinhood, Arbitrum↔Robinhood) is `LZDeadDVN`**: LayerZero
+provides no default security stack for them, so `lz:oapp:wire` with explicit DVNs is mandatory. DVNs available as
+messaging DVNs on **all three** chains (metadata API, 2026-10-26): LayerZero Labs, Horizen, Luganodes, P2P, Canary,
+Superform, Frax, Nansen, Deutsche Telekom, Twinstake, ApeDVN. `Nethermind` is **not** usable: on BSC and Arbitrum it is
+only listed as an lzRead DVN, so name resolution fails. `layerzero.config.ts` requires `LayerZero Labs` + `Horizen` on
+every pathway; confirmations are the on-chain defaults (BSC → 20, Arbitrum → 20, Robinhood → 5); enforced `lzReceive` gas
+120k / 150k (profiled in `test/foundry/PultBridgeGas.t.sol`). See [AUDIT.md](AUDIT.md) for the trust model and review notes.
 
 ## Setup
 
 ```bash
 pnpm install
-cp .env.example .env   # set MNEMONIC or PRIVATE_KEY, RPC URLs, BSCSCAN_API_KEY
+cp .env.example .env   # set MNEMONIC or PRIVATE_KEY, RPC URLs, ETHERSCAN_API_KEY
 ```
 
+Use pnpm 9/10 (`npx pnpm@10 install`): pnpm 11 ignores the `pnpm.overrides` field and rejects the frozen lockfile.
 Requires Node >= 18 and [Foundry](https://book.getfoundry.sh/) for the Solidity tests.
 
 ## Test
@@ -96,13 +107,15 @@ fee on both directions, `quoteOFT`, fee + slippage, `withdrawFees`, fuzzed backi
 ```bash
 # 1. Deploy (interactive: pick networks, then tags)
 npx hardhat lz:deploy
-#    bsc        -> tag PultOFTAdapter   (uses PULT_TOKEN_BSC from hardhat.config.ts)
+#    bsc        -> tag PultOFTAdapter   (wraps the existing token, PULT_TOKEN_BSC in hardhat.config.ts)
 #    robinhood  -> tag PultOFT
+#    arbitrum   -> tag PultOFT
 # Non-interactive:
 npx hardhat lz:deploy --networks bsc --tags PultOFTAdapter --ci
-npx hardhat lz:deploy --networks robinhood --tags PultOFT --ci
+npx hardhat lz:deploy --networks robinhood,arbitrum --tags PultOFT --ci
 
-# 2. Wire peers, DVNs, confirmations and enforced options on both sides
+# 2. Wire peers, DVNs, confirmations and enforced options on all three chains (6 directions).
+#    Signs transactions on every chain: the deployer (= owner/delegate) needs native gas on BSC, Robinhood and Arbitrum.
 npx hardhat lz:oapp:wire --oapp-config layerzero.config.ts
 
 # 3. Verify
@@ -120,21 +133,24 @@ Before wiring mainnet compare the chosen confirmations with LayerZero defaults:
 npx hardhat lz:oapp:config:get:default --oapp-config layerzero.config.ts
 ```
 
-### Testnet (BSC testnet ↔ Robinhood testnet)
+### Testnet (BSC testnet ↔ Robinhood testnet ↔ Arbitrum Sepolia)
 
 ```bash
 npx hardhat lz:deploy --networks bsc-testnet --tags PultOFTAdapter --ci   # also deploys CatapultTrade (dependency)
-npx hardhat lz:deploy --networks robinhood-testnet --tags PultOFT --ci
+npx hardhat lz:deploy --networks robinhood-testnet,arbitrum-sepolia --tags PultOFT --ci
 npx hardhat lz:oapp:wire --oapp-config layerzero.testnet.config.ts
+AMOUNT=1 DST=arbitrum-sepolia npx hardhat run scripts/sendTest.ts --network bsc-testnet
 ```
 
 ### Verify source
 
-Uses `@nomicfoundation/hardhat-verify` (`BSCSCAN_API_KEY` for BSC, Blockscout for Robinhood, no key needed).
+Uses `@nomicfoundation/hardhat-verify`: one Etherscan v2 key (`ETHERSCAN_API_KEY`) for BSC and Arbitrum, Blockscout
+for Robinhood (no key). `hardhat.config.ts` enables exactly one verifier based on `--network`.
 
 ```bash
 npx hardhat verify --network bsc <adapter> 0x2eae2fef601c75d4ec24bdadb17fe6e3d910c154 0x1a44076050125825900e736c501f859c50fE728c <owner>
 npx hardhat verify --network robinhood <oft> "Catapult Trade" PULT 0x6F475642a6e85809B1c36Fa62763669b1b48DD5B <owner>
+npx hardhat verify --network arbitrum <oft> "Catapult Trade" PULT 0x1a44076050125825900e736c501f859c50fE728c <owner>
 ```
 
 Robinhood Chain uses Blockscout (`https://robinhoodchain.blockscout.com`); the custom chain is preconfigured in `hardhat.config.ts`.
@@ -142,17 +158,19 @@ Robinhood Chain uses Blockscout (`https://robinhoodchain.blockscout.com`); the c
 ## Bridging
 
 Users on BSC `approve(adapter, amount)` (or `permit`) then call `adapter.send(SendParam, MessagingFee, refundAddress)` with the
-quoted native fee from `quoteSend`. On Robinhood `PultOFT.send` burns and needs no approval. Amounts are rounded down to
-`1e12` wei; set `minAmountLD` accordingly.
+quoted native fee from `quoteSend`. On Robinhood and Arbitrum `PultOFT.send` burns and needs no approval. Amounts are
+rounded down to `1e12` wei; set `minAmountLD` from `quoteOFT` (covers fee and dust).
 
 ## Scripts
 
 ```bash
 # deployer address + native balance on a network (reads PRIVATE_KEY / MAINNET_PRIVATE_KEY; DOTENV_CONFIG_PATH may point to another .env)
 npx hardhat run scripts/whoami.ts --network bsc
-# send tokens across (AMOUNT in whole tokens, TO defaults to the signer)
-AMOUNT=1 npx hardhat run scripts/sendTest.ts --network bsc          # BSC -> Robinhood
-AMOUNT=0.5 npx hardhat run scripts/sendTest.ts --network robinhood  # Robinhood -> BSC
+# send tokens across (AMOUNT in whole tokens, DST = destination network name, TO defaults to the signer)
+AMOUNT=1 npx hardhat run scripts/sendTest.ts --network bsc                      # BSC -> Robinhood (default DST)
+AMOUNT=1 DST=arbitrum npx hardhat run scripts/sendTest.ts --network bsc         # BSC -> Arbitrum
+AMOUNT=0.5 DST=arbitrum npx hardhat run scripts/sendTest.ts --network robinhood # Robinhood -> Arbitrum
+AMOUNT=0.5 npx hardhat run scripts/sendTest.ts --network arbitrum               # Arbitrum -> BSC (default DST)
 ```
 
 ## Layout
@@ -166,6 +184,6 @@ test/mocks/           PultOFTMock.sol, PultOFTAdapterMock.sol, OFTComposerMock.s
 scripts/              whoami.ts, sendTest.ts, setFee.ts, withdrawFees.ts
 deployments/          hardhat-deploy artifacts per network (created by lz:deploy, committed for wiring)
 AUDIT.md              scope, trust model, internal review findings, pre-deploy checklist
-layerzero.config.ts   mainnet mesh (BSC <-> Robinhood)
+layerzero.config.ts   mainnet mesh (BSC <-> Robinhood <-> Arbitrum)
 layerzero.testnet.config.ts
 ```
