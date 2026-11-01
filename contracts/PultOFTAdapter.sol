@@ -97,12 +97,17 @@ contract PultOFTAdapter is OFTAdapter, PultFee {
     }
 
     /**
-     * @dev Rejects recipient `bytes32(0)` and the destination OApp itself: tokens credited to either can never be
-     *      recovered (the adapter cannot `safeTransfer` to address(0), so such a message could never execute on BSC).
+     * @dev Rejects any recipient that is not a canonical (left-zero-padded) EVM address, plus address(0) and the
+     *      destination OApp itself: the destination credits only the low 160 bits of `to` (`OFTMsgCodec.sendTo`),
+     *      so non-zero upper bits would silently redirect the transfer (e.g. a right-padded address), and tokens
+     *      credited to address(0) or the OApp can never be recovered (the adapter cannot `safeTransfer` to
+     *      address(0), so such a message could never execute on BSC). The checks compare the decoded addresses.
      *      Runs in `quoteOFT`, `quoteSend` and `send` (via `_buildMsgAndOptions`), so wallets fail at quote time.
      */
     function _checkRecipient(uint32 _dstEid, bytes32 _to) internal view {
-        if (_to == bytes32(0) || _to == peers[_dstEid]) revert InvalidRecipient();
+        if (uint256(_to) >> 160 != 0) revert InvalidRecipient();
+        address to = address(uint160(uint256(_to)));
+        if (to == address(0) || to == address(uint160(uint256(peers[_dstEid])))) revert InvalidRecipient();
     }
 
     function _buildMsgAndOptions(

@@ -264,6 +264,51 @@ contract PultBridgeHardeningTest is TestHelperOz5 {
         assertEq(oftArbitrum.balanceOf(composer), 1 ether);
     }
 
+    // ================================================ MixBytes L-1: non-canonical `to` encodings (fixed)
+    // The destination credits only the low 160 bits of `to`, so any non-zero upper 96 bits must be rejected.
+
+    function test_L1_dirty_upper_bits_with_zero_low_bits_rejected() public {
+        _bridge(BSC_EID, ROBINHOOD_EID, userA, addressToBytes32(userA), 10 ether);
+        bytes32 to = bytes32(uint256(1) << 160); // passes `!= bytes32(0)`, decodes to address(0)
+
+        vm.expectRevert(PultOFTAdapter.InvalidRecipient.selector);
+        adapter.quoteOFT(_sp(ROBINHOOD_EID, to, 1 ether, 0));
+        vm.expectRevert(PultOFT.InvalidRecipient.selector);
+        oftRobinhood.quoteSend(_sp(BSC_EID, to, 1 ether, 0), false);
+        vm.prank(userA);
+        vm.expectRevert(PultOFT.InvalidRecipient.selector);
+        oftRobinhood.send{ value: 1 ether }(_sp(BSC_EID, to, 4 ether, 0), MessagingFee(1 ether, 0), payable(userA));
+
+        assertEq(oftRobinhood.balanceOf(userA), 10 ether, "nothing burned");
+        assertEq(_lockboxExcess(), 0);
+    }
+
+    function test_L1_dirty_upper_bits_with_peer_in_low_bits_rejected() public {
+        _bridge(BSC_EID, ROBINHOOD_EID, userA, addressToBytes32(userA), 10 ether);
+        bytes32 dirtyOft = addressToBytes32(address(oftRobinhood)) | bytes32(uint256(1) << 255);
+        bytes32 dirtyAdapter = addressToBytes32(address(adapter)) | bytes32(uint256(1) << 160);
+
+        vm.expectRevert(PultOFTAdapter.InvalidRecipient.selector);
+        adapter.quoteSend(_sp(ROBINHOOD_EID, dirtyOft, 1 ether, 0), false);
+        vm.expectRevert(PultOFT.InvalidRecipient.selector);
+        oftRobinhood.quoteOFT(_sp(BSC_EID, dirtyAdapter, 1 ether, 0));
+    }
+
+    function test_L1_right_padded_address_rejected() public {
+        // ethers v6 zeroPadBytes(addr, 32) right-pads: bytes32(bytes20(addr))
+        bytes32 rightPadded = bytes32(bytes20(userA));
+        vm.expectRevert(PultOFTAdapter.InvalidRecipient.selector);
+        adapter.quoteOFT(_sp(ROBINHOOD_EID, rightPadded, 1 ether, 0));
+    }
+
+    function testFuzz_L1_any_non_canonical_to_rejected(bytes32 to) public {
+        vm.assume(uint256(to) >> 160 != 0);
+        vm.expectRevert(PultOFTAdapter.InvalidRecipient.selector);
+        adapter.quoteOFT(_sp(ROBINHOOD_EID, to, 1 ether, 0));
+        vm.expectRevert(PultOFT.InvalidRecipient.selector);
+        oftRobinhood.quoteOFT(_sp(ARBITRUM_EID, to, 1 ether, 0));
+    }
+
     // ================================================================== F-04: delegate can drop a verified transfer
     // Inherent to LayerZero (documented in AUDIT.md §3); mitigated by a multisig owner + delegate.
 

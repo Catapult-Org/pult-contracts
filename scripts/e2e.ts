@@ -19,7 +19,8 @@ import { artifacts, config } from 'hardhat'
  *                stage 2-3 step fails, so an aborted run never leaves fees switched on)
  *   4. return:   everything (user balances and withdrawn OFT fees) is bridged back to BSC
  * After every delivered stage: backing invariant
- *   PULT.balanceOf(adapter) == supply(Robinhood) + supply(Arbitrum) + adapter.feeBalance
+ *   PULT.balanceOf(adapter) >= supply(Robinhood) + supply(Arbitrum) + adapter.feeBalance
+ *   (>=, not ==: anyone can donate PULT to the adapter directly, and that excess is unwithdrawable)
  * and exact balance checks (received == quoteOFT, fee == formula).
  *
  * Usage: DEPLOY_STAGE=staging NETWORKS=bsc,robinhood,arbitrum npx hardhat run scripts/e2e.ts   (or `pnpm e2e`)
@@ -114,7 +115,8 @@ async function main() {
         log(
             `invariant [${label}] locked=${fmt(locked)} supplyRobinhood=${fmt(s1)} supplyArbitrum=${fmt(s2)} adapterFees=${fmt(adapterFees)}`
         )
-        if (!locked.eq(backed)) throw new Error(`backing invariant broken: ${fmt(locked)} != ${fmt(backed)}`)
+        if (locked.lt(backed)) throw new Error(`backing invariant broken: ${fmt(locked)} < ${fmt(backed)}`)
+        if (locked.gt(backed)) log(`  note: adapter holds ${fmt(locked.sub(backed))} donated PULT above backing`)
         if (!own1.eq(f1) || !own2.eq(f2)) throw new Error('OFT fee custody broken (self balance != feeBalance)')
     }
 
@@ -383,11 +385,11 @@ async function main() {
     }
     await checkInvariant('after withdraw')
     if (
-        !(await bsc.token.balanceOf(bsc.app.address)).eq(
+        (await bsc.token.balanceOf(bsc.app.address)).lt(
             (await robinhood.app.totalSupply()).add(await arbitrum.app.totalSupply())
         )
     ) {
-        throw new Error('after withdrawing, the adapter must hold exactly the remote supply')
+        throw new Error('after withdrawing, the adapter must still cover the remote supply')
     }
 
     // ------------------------------------------------------------------ 4. everything back to BSC
