@@ -78,7 +78,8 @@ provides no default security stack for them, so `lz:oapp:wire` with explicit DVN
 messaging DVNs on **all three** chains (metadata API, 2026-10-26): LayerZero Labs, Horizen, Luganodes, P2P, Canary,
 Superform, Frax, Nansen, Deutsche Telekom, Twinstake, ApeDVN. `Nethermind` is **not** usable: on BSC and Arbitrum it is
 only listed as an lzRead DVN, so name resolution fails. `layerzero.config.ts` requires `LayerZero Labs` + `Horizen` on
-every pathway; confirmations are the on-chain defaults (BSC → 20, Arbitrum → 20, Robinhood → 5); enforced `lzReceive` gas
+every pathway; confirmations wait for source-chain finality (BSC 20, Robinhood 12,000 ≈ 21 min, Arbitrum 4,500 ≈ 22 min,
+see AUDIT.md §4.2), so transfers out of Robinhood / Arbitrum take ~20+ min; enforced `lzReceive` gas
 200k / 250k (profiled in `test/foundry/PultBridgeGas.t.sol`, ≥ 25 % headroom). See [AUDIT.md](AUDIT.md) for the trust model and review notes.
 
 ## Setup
@@ -151,9 +152,13 @@ DEPLOY_STAGE=staging npx hardhat run scripts/checkConfig.ts
 DEPLOY_STAGE=staging E2E_AMOUNT=100 npx hardhat run scripts/e2e.ts   # = pnpm e2e (pnpm 9/10)
 ```
 
-The current staging mesh and the retired first one are listed in [AUDIT.md](AUDIT.md) §0.2. A retired staging mesh is
-emptied and unpeered (`setPeer(eid, 0)` in every direction) so it cannot carry messages; its artifacts stay in
-`deployments-staging-v1/`.
+Both staging meshes are retired (listed in [AUDIT.md](AUDIT.md) §0.2): emptied and unpeered (`setPeer(eid, 0)` in every
+direction) so they cannot carry messages. A new staging run needs a fresh mesh; retire it again before production opens:
+
+```bash
+DEPLOY_STAGE=staging npx hardhat run scripts/retireStaging.ts            # read-only status
+DEPLOY_STAGE=staging RETIRE=1 npx hardhat run scripts/retireStaging.ts   # withdraw fees, bridge back, unset all peers
+```
 
 The deploy scripts guard themselves: `PultOFTAdapter` only deploys on a network with an `oftAdapter.tokenAddress`
 (the home chain), `PultOFT` only on networks without one, and `CatapultTrade` is skipped wherever a token address is configured.
@@ -193,8 +198,9 @@ quoted native fee from `quoteSend`. On Robinhood and Arbitrum `PultOFT.send` bur
 rounded down to `1e12` wei; set `minAmountLD` from `quoteOFT` (covers fee and dust). `quoteOFT` also returns the fee in
 `oftFeeDetails`.
 
-Rejected on the source chain (quote and send revert, nothing moves): recipient `bytes32(0)` or the destination bridge
-contract (`InvalidRecipient`), and amounts that would deliver 0 after fee and dust (`AmountTooSmall`, e.g. < 1e12 wei).
+Rejected on the source chain (quote and send revert, nothing moves): a recipient that is not a left-zero-padded EVM
+address (non-zero upper 96 bits, e.g. ethers v6 `zeroPadBytes`, which right-pads — use `hexZeroPad` / `zeroPadValue`),
+address(0) or the destination bridge contract (`InvalidRecipient`), and amounts that would deliver 0 after fee and dust (`AmountTooSmall`, e.g. < 1e12 wei).
 
 ## Scripts
 

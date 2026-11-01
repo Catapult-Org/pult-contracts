@@ -38,7 +38,7 @@ Result on the staging meshes (§0.2), 2026-10-27:
 A separate mesh with the audited code is deployed on the real chains (`DEPLOY_STAGE=staging`, `deployments-staging/`),
 wired with the production `layerzero.config.ts`:
 
-| Chain     | Contract                                | Hardened staging (current)                   | First staging (retired)                      |
+| Chain     | Contract                                | Hardened staging (retired 2026-11-01)        | First staging (retired)                      |
 | --------- | --------------------------------------- | -------------------------------------------- | -------------------------------------------- |
 | BSC       | `PultOFTAdapter` over the real PULT     | `0xab969a9CE0E5b37B3d20D65169Ef1F1f35f7B216` | `0xFb66e0167c9C97b01FE3b5F453198e7B6252CDb5` |
 | Robinhood | `PultOFT` ("PULT Staging" / "PULT-STG") | `0x1b5EaD6d3DBAae054e3391561d71dc0Dc362F8D6` | `0x14522Cb95a0B7D99E03F5e680C2f866623d61Ae9` |
@@ -46,6 +46,9 @@ wired with the production `layerzero.config.ts`:
 
 The first staging mesh (code before §0.3) passed the full run below on 2026-10-27 21:01–21:05 UTC; it was then emptied
 (lockbox 0, supplies 0) and all 6 peers were set to 0, so it can no longer send or receive (`deployments-staging-v1/`).
+The hardened staging mesh was retired the same way on 2026-11-01 (MixBytes Deployment Requirement 3) with
+`scripts/retireStaging.ts`: lockbox and supplies were already 0, all 6 peers set to 0. A new staging mesh (fresh
+`DEPLOY_STAGE`) is needed for any further live e2e run; retire it again before production opens.
 
 `scripts/e2e.ts` uses a separate user wallet, real DVNs and executors; every delivery is matched by GUID (`OFTSent` →
 `OFTReceived`) and checked for the exact amount. Run on the hardened mesh (unit 20 PULT):
@@ -90,6 +93,17 @@ Every finding was proven with a test first, then fixed; the proofs are now regre
 | I-03 | Info       | Stale lines in this document (120k / 150k gas, "up to 100 %", "`Fee` from oft-evm", "retryable")                                 | Corrected                                                                                                                                       |
 | I-04 | Info       | `quoteOFT().oftFeeDetails` was always empty                                                                                      | `quoteOFT` now returns one entry "PULT bridge fee + dust" with the exact amount when a fee or dust is taken                                     |
 | I-05 | Info       | `checkConfig.ts` only checked declared peers; the first staging adapter stayed peered and live                                   | `checkConfig.ts` fails on any undeclared peer; the first staging mesh was emptied and unpeered                                                  |
+
+### 0.4 MixBytes interim audit (2026-10-28, commit `525c082`)
+
+0 Critical / 0 High / 0 Medium / 1 Low.
+
+| ID  | Severity | Finding                                                                                                                                                                                           | Fix                                                                                                                                                                                                      |
+| --- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| L-1 | Low      | `_checkRecipient` compared the whole `bytes32 to`, but the destination credits only its low 160 bits: dirty upper bits with a zero / peer / right-padded address in the low bits passed the check | `_checkRecipient` reverts `InvalidRecipient` when the upper 96 bits are non-zero, then compares the decoded address with address(0) and the decoded peer. Regression tests `test_L1_*` / `testFuzz_L1_*` |
+| —   | Note     | Backing can exceed supply + `feeBalance` (anyone can donate PULT to the adapter); `scripts/e2e.ts` required equality                                                                              | `scripts/e2e.ts` now checks `>=` and logs any donated excess                                                                                                                                             |
+| DR3 | Deploy   | Staging adapter also locks PULT and was still wired in every direction                                                                                                                            | Staging mesh retired on 2026-11-01 (`scripts/retireStaging.ts`): supply 0, lockbox 0, 6 peers → 0. Both staging meshes now have no peers                                                                 |
+| DR4 | Deploy   | Robinhood → * verified after 5 blocks (~0.5 s), i.e. only the sequencer's soft confirmation; a reorg after verification credits the destination for a vanished debit                              | Confirmations raised past measured Ethereum finality: Robinhood 12,000 (~21 min), Arbitrum 4,500 (~22 min), BSC 20 (fast finality). See §4.2                                                             |
 
 ## 1. Scope
 
@@ -168,10 +182,15 @@ Remaining findings concern configuration and operations.
 on defaults never delivers a message. `layerzero.config.ts` sets explicit DVNs, and `lz:oapp:wire` must be run on both chains
 before opening the bridge. Verification: `npx hardhat lz:oapp:config:get --oapp-config layerzero.config.ts` must show no dead DVN.
 
-### 4.2 [Low → fixed] Confirmations were symmetric `[20, 20]`
+### 4.2 [fixed after MixBytes DR4] Confirmations covered only the sequencer's soft confirmation
 
-On-chain defaults are 20 (BSC→Robinhood) and 5 (Robinhood→BSC). Robinhood blocks are slow when the chain is idle, so 20
-confirmations there would add long delays without a security benefit. Config now `[20, 5]`.
+The first config used the on-chain defaults (BSC 20, Arbitrum 20, Robinhood 5). Robinhood and Arbitrum are Arbitrum
+Nitro rollups settling to Ethereum: a block is reorg-proof only once the Ethereum block carrying its batch is finalized.
+Measured on 2026-11-01 (`eth_getBlockByNumber("finalized")` vs `"latest"`): Robinhood trails by ~9,300 blocks (~16 min,
+0.104 s blocks), Arbitrum by ~3,400 blocks (~17 min, 0.30 s blocks); BSC's fast finality finalizes within ~2-3 blocks.
+Config now: BSC 20, Robinhood 12,000 (~21 min; ~16 min even at 81 ms blocks), Arbitrum 4,500 (~22 min). Cost: transfers
+out of Robinhood or Arbitrum take ~20+ min to arrive. Blocks are produced only with traffic, so a quieter chain makes the
+wait longer, never less safe.
 
 ### 4.3 [Low → fixed] Enforced `lzReceive` gas of 80k from the LayerZero example was too tight
 

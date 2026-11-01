@@ -72,12 +72,41 @@ const EVM_ENFORCED_OPTIONS: OAppEnforcedOption[] = [
 // Each entry: [ A, B, DVN config, [ confirmations A -> B, confirmations B -> A ], [ enforced on B, enforced on A ] ]
 // IMPORTANT: the on-chain *default* DVN of both Robinhood pathways is `LZDeadDVN`, i.e. LayerZero ships no default
 // security stack for them. Explicit DVNs are mandatory or messages never verify.
-// Confirmations mirror the on-chain LayerZero defaults (SendUln302.getUlnConfig(address(0), dstEid), read 2026-10-26):
-// BSC and Arbitrum send with 20, Robinhood sends with 5. Re-check: `npx hardhat lz:oapp:config:get:default`.
+// Confirmations = blocks the source chain must reach before DVNs verify a transfer. They must exceed the depth to which
+// the source can still reorganize (MixBytes interim audit, Deployment Requirement 4), not just a sequencer's soft
+// confirmation: a reorg after verification credits the destination for a source debit that no longer exists.
+//   BSC:       fast finality finalizes within ~2-3 blocks (0.45 s blocks); 20 blocks (~9 s) is beyond that.
+//   Robinhood: Arbitrum Orbit L2 settling to Ethereum; blocks are final only once their batch's Ethereum block is
+//              finalized. Measured 2026-11-01: `finalized` trails `latest` by ~9,300 blocks (~16 min at 0.104 s).
+//              12,000 blocks ≈ 21 min (≈ 16 min even at an 81 ms block time).
+//   Arbitrum:  same mechanism; `finalized` trails by ~3,400 blocks (~17 min at 0.30 s). 4,500 blocks ≈ 22 min.
+// LayerZero's on-chain defaults (20 / 5 / 20) only cover the sequencer's soft confirmation.
+// Re-measure with eth_getBlockByNumber("finalized") vs "latest" if block times change.
+const BSC_CONFIRMATIONS = 20
+const ROBINHOOD_CONFIRMATIONS = 12_000
+const ARBITRUM_CONFIRMATIONS = 4_500
 const pathways: TwoWayConfig[] = [
-    [bscContract, robinhoodContract, DVNS, [20, 5], [EVM_ENFORCED_OPTIONS, EVM_ENFORCED_OPTIONS]],
-    [bscContract, arbitrumContract, DVNS, [20, 20], [EVM_ENFORCED_OPTIONS, EVM_ENFORCED_OPTIONS]],
-    [robinhoodContract, arbitrumContract, DVNS, [5, 20], [EVM_ENFORCED_OPTIONS, EVM_ENFORCED_OPTIONS]],
+    [
+        bscContract,
+        robinhoodContract,
+        DVNS,
+        [BSC_CONFIRMATIONS, ROBINHOOD_CONFIRMATIONS],
+        [EVM_ENFORCED_OPTIONS, EVM_ENFORCED_OPTIONS],
+    ],
+    [
+        bscContract,
+        arbitrumContract,
+        DVNS,
+        [BSC_CONFIRMATIONS, ARBITRUM_CONFIRMATIONS],
+        [EVM_ENFORCED_OPTIONS, EVM_ENFORCED_OPTIONS],
+    ],
+    [
+        robinhoodContract,
+        arbitrumContract,
+        DVNS,
+        [ROBINHOOD_CONFIRMATIONS, ARBITRUM_CONFIRMATIONS],
+        [EVM_ENFORCED_OPTIONS, EVM_ENFORCED_OPTIONS],
+    ],
 ]
 
 export default async function () {
